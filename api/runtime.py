@@ -14,6 +14,7 @@ from loguru import logger
 from api.admin_urls import local_admin_url
 from config.hot_reload import start_reload_watcher, stop_reload_watcher
 from config.settings import Settings, _reload_cached_settings, get_settings
+from core.token_tracking import TokenTracker
 from providers.exceptions import ServiceUnavailableError
 from providers.registry import ProviderRegistry
 
@@ -109,6 +110,10 @@ class AppRuntime:
         try:
             # Start hot-reload watcher for .env changes
             start_reload_watcher(_reload_cached_settings)
+            # Initialize token tracker (loads persisted data from DB)
+            token_tracker = TokenTracker.get_instance()
+            # Clean up old data (older than 30 days)
+            token_tracker.cleanup_old_data(days=30)
             warn_if_process_auth_token(self.settings)
             await self._validate_configured_models_best_effort()
             self._provider_registry.start_model_list_refresh(self.settings)

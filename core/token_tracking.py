@@ -1,16 +1,19 @@
-"""Token usage tracking and analytics.
+"""Token usage tracking and analytics with persistent storage.
 
 Tracks token consumption hierarchically:
 - Total across all providers
 - Per provider total
 - Per model within each provider
 - Input/output tokens separately
+- Persists to SQLite database for durability
 """
 
+import sqlite3
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import ClassVar
 
 from loguru import logger
@@ -50,14 +53,24 @@ class TokenStats:
         }
 
 
+def _get_db_path() -> Path:
+    """Get the path to the token tracking database."""
+    from config.paths import managed_env_path
+    
+    # Store in same location as managed env (typically project root)
+    base_path = managed_env_path().parent
+    db_path = base_path / "token_tracking.db"
+    return db_path
+
+
 class TokenTracker:
-    """Centralized token usage tracker with provider/model hierarchy."""
+    """Centralized token usage tracker with provider/model hierarchy and persistence."""
 
     _instance: ClassVar["TokenTracker | None"] = None
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self):
-        """Initialize the token tracker."""
+        """Initialize the token tracker with persistent storage."""
         # Structure: {provider_id: {model_id: TokenStats}}
         self._tokens_by_provider: dict[str, dict[str, TokenStats]] = defaultdict(
             lambda: defaultdict(TokenStats)
@@ -68,6 +81,98 @@ class TokenTracker:
         self._data_lock = threading.Lock()
         # Time window stats (for analytics)
         self._time_windows: dict[str, TokenStats] = defaultdict(TokenStats)
+        # Database path
+        self._db_path = _get_db_path()
+        
+        # Initialize database
+        self._init_db()
+        # Load existing data from database
+        self._load_from_db()
+
+    def _init_db(self) -> None:
+        """Initialize SQLite database schema."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS token_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        provider_id TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        input_tokens INTEGER DEFAULT 0,
+                        output_tokens INTEGER DEFAULT 0,
+                        request_count INTEGER DEFAULT 0,
+                        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(provider_id, model_id, recorded_at)
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_provider_model 
+                    ON token_usage(provider_id, model_id)
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_recorded_at 
+                    ON token_usage(recorded_at)
+                """)
+                conn.commit()
+            logger.debug(f"Token tracking database initialized at {self._db_path}")
+        except Exception as e:
+            logger.error(f"Failed to initialize token tracking database: {e}")
+
+    def _load_from_db(self) -> None:
+        """Load token statistics from database into memory."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.execute("""
+                    SELECT provider_id, model_id, 
+                           SUM(input_tokens), SUM(output_tokens), 
+                           SUM(request_count)
+                    FROM token_usage
+                    GROUP BY provider_id, model_id
+                """)
+                
+                for provider_id, model_id, input_tokens, output_tokens, request_count in cursor:
+                    if input_tokens is None:
+                        continue
+                    self._tokens_by_provider[provider_id][model_id].add(
+                        input_tokens or 0,
+                        output_tokens or 0,
+                        request_count or 0,
+                    )
+                    self._total_tokens.add(
+                        input_tokens or 0,
+                        output_tokens or 0,
+                        request_count or 0,
+                    )
+            
+            logger.info("Token tracking data loaded from persistent storage")
+        except Exception as e:
+            logger.error(f"Failed to load token tracking data from database: {e}")
+
+    def _save_to_db(
+        self, provider_id: str, model_id: str, 
+        input_tokens: int, output_tokens: int
+    ) -> None:
+        """Save token usage to database (asynchronous to avoid blocking)."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                # Record at hourly granularity to avoid too many entries
+                now = datetime.utcnow()
+                hour_bucket = now.replace(minute=0, second=0, microsecond=0)
+                
+                conn.execute("""
+                    INSERT INTO token_usage 
+                    (provider_id, model_id, input_tokens, output_tokens, request_count, recorded_at)
+                    VALUES (?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(provider_id, model_id, recorded_at) 
+                    DO UPDATE SET
+                        input_tokens = input_tokens + ?,
+                        output_tokens = output_tokens + ?,
+                        request_count = request_count + 1
+                """, (provider_id, model_id, input_tokens, output_tokens, hour_bucket,
+                      input_tokens, output_tokens))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to save to database: {e}")
 
     @classmethod
     def get_instance(cls) -> "TokenTracker":
@@ -122,6 +227,77 @@ class TokenTracker:
                 output_tokens,
                 input_tokens + output_tokens,
             )
+
+        # Save to database asynchronously
+        threading.Thread(
+            target=self._save_to_db,
+            args=(provider_id, model_id, input_tokens, output_tokens),
+            daemon=True,
+        ).start()
+
+    def get_history(self, hours: int = 24) -> dict:
+        """Get token usage history for the last N hours.
+
+        Args:
+            hours: Number of hours to retrieve (default 24)
+
+        Returns:
+            Dict mapping hour timestamp to TokenStats
+        """
+        with self._data_lock:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+            # From database
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    cursor = conn.execute("""
+                        SELECT recorded_at, 
+                               SUM(input_tokens), SUM(output_tokens), 
+                               SUM(request_count)
+                        FROM token_usage
+                        WHERE recorded_at >= ?
+                        GROUP BY recorded_at
+                        ORDER BY recorded_at DESC
+                    """, (cutoff,))
+
+                    history = {}
+                    for recorded_at, input_tokens, output_tokens, request_count in cursor:
+                        stats = TokenStats()
+                        stats.input_tokens = input_tokens or 0
+                        stats.output_tokens = output_tokens or 0
+                        stats.total_tokens = (input_tokens or 0) + (output_tokens or 0)
+                        stats.request_count = request_count or 0
+                        history[recorded_at] = stats
+
+                    return history
+            except Exception as e:
+                logger.error(f"Failed to query history from database: {e}")
+                return {}
+
+    def cleanup_old_data(self, days: int = 30) -> int:
+        """Clean up token records older than specified days.
+
+        Args:
+            days: Number of days to retain (default 30)
+
+        Returns:
+            Number of records deleted
+        """
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.execute("""
+                    DELETE FROM token_usage
+                    WHERE recorded_at < ?
+                """, (cutoff,))
+                conn.commit()
+                deleted = cursor.rowcount
+                if deleted > 0:
+                    logger.info(f"Cleaned up {deleted} old token records")
+                return deleted
+        except Exception as e:
+            logger.error(f"Failed to cleanup old data: {e}")
+            return 0
 
     def get_total_tokens(self) -> TokenStats:
         """Get global token statistics."""

@@ -397,3 +397,49 @@ async def reset_token_tracker():
     tracker = get_token_tracker()
     tracker.clear()
     return {"status": "cleared", "message": "Token tracker has been reset"}
+
+
+@router.get("/admin/api/tokens/storage")
+async def get_token_storage_info():
+    """Get information about persistent token storage (database)."""
+    from pathlib import Path
+    import os
+    
+    tracker = get_token_tracker()
+    db_path = tracker._db_path
+    
+    info = {
+        "database_location": str(db_path),
+        "database_exists": db_path.exists(),
+    }
+    
+    if db_path.exists():
+        # Get file size
+        size_bytes = os.path.getsize(db_path)
+        
+        # Get record count
+        try:
+            import sqlite3
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM token_usage")
+                record_count = cursor.fetchone()[0]
+                
+                cursor = conn.execute(
+                    "SELECT MIN(recorded_at), MAX(recorded_at) FROM token_usage"
+                )
+                min_date, max_date = cursor.fetchone()
+                
+                info.update({
+                    "size_bytes": size_bytes,
+                    "size_mb": round(size_bytes / (1024 * 1024), 2),
+                    "record_count": record_count,
+                    "earliest_record": min_date,
+                    "latest_record": max_date,
+                    "retention_days": 30,
+                    "persistence": "enabled",
+                })
+        except Exception as e:
+            info["error"] = str(e)
+    
+    return info
+
