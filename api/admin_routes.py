@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -435,11 +436,77 @@ async def get_token_storage_info():
                     "record_count": record_count,
                     "earliest_record": min_date,
                     "latest_record": max_date,
-                    "retention_days": 30,
+                    "data_retention": "indefinite (no auto-delete)",
                     "persistence": "enabled",
                 })
         except Exception as e:
             info["error"] = str(e)
     
     return info
+
+
+@router.post("/admin/api/tokens/backup")
+async def backup_token_data():
+    """Export all token data to JSON format for backup.
+    
+    Use this when switching devices - export, transfer file, then imports on new device.
+    """
+    tracker = get_token_tracker()
+    return {
+        "status": "success",
+        "data": tracker.export_to_json(),
+        "message": "Save this JSON data to a file to backup. Use /restore to load it on another device.",
+    }
+
+
+@router.post("/admin/api/tokens/restore")
+async def restore_token_data(backup_data: dict):
+    """Restore token data from a backup JSON.
+    
+    Request body should be the data from /backup endpoint.
+    ⚠️ This will merge with existing data - use /reset first if you want to replace.
+    """
+    tracker = get_token_tracker()
+    try:
+        tracker.import_from_json(backup_data)
+        return {
+            "status": "success",
+            "message": "Token data restored from backup",
+            "data_restored": tracker.export_to_json(),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+
+@router.post("/admin/api/tokens/backup/file")
+async def backup_to_file():
+    """Generate a downloadable backup file (JSON).
+    
+    This endpoint returns the backup data - save with .json extension.
+    """
+    from pathlib import Path
+    tracker = get_token_tracker()
+    
+    try:
+        # Create backup in /tmp
+        backup_path = Path("/tmp") / f"token_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        tracker.backup_to_file(str(backup_path))
+        
+        # Return the data (client can download or save)
+        return {
+            "status": "success",
+            "backup_location": str(backup_path),
+            "filename": backup_path.name,
+            "data": tracker.export_to_json(),
+            "message": "Backup file created. Save the 'data' field as JSON.",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
 

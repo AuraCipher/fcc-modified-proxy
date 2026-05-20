@@ -4,6 +4,7 @@ const state = {
   localStatus: new Map(),
   modelOptions: [],
   activeView: "providers",
+  tokenAutoRefreshInterval: null,  // Auto-refresh interval for token usage view
 };
 
 const MASKED_SECRET = "********";
@@ -159,9 +160,17 @@ function setActiveView(viewId, { scroll = false } = {}) {
     view.hidden = !selected;
   });
 
+  // Clear any existing auto-refresh interval
+  if (state.tokenAutoRefreshInterval) {
+    clearInterval(state.tokenAutoRefreshInterval);
+    state.tokenAutoRefreshInterval = null;
+  }
+
   // Load token data when switching to tokens view
   if (activeView.id === "tokens") {
     loadTokenData();
+    // Set up auto-refresh every 30 seconds (30000 milliseconds)
+    state.tokenAutoRefreshInterval = setInterval(loadTokenDataSilent, 30000);
   }
 
   if (scroll) {
@@ -508,6 +517,21 @@ async function loadTokenData() {
     showMessage("Token data loaded");
   } catch (error) {
     showMessage(`Failed to load token data: ${error.message}`, "error");
+  }
+}
+
+// Load token data silently (for auto-refresh every 30 seconds)
+async function loadTokenDataSilent() {
+  try {
+    const data = await api("/admin/api/tokens/hierarchy");
+    renderTokenData(data);
+    // Silently update - only show status in subtle way
+    const now = new Date().toLocaleTimeString();
+    byId("messageArea").textContent = `Last refreshed: ${now}`;
+    byId("messageArea").className = "message-area";
+  } catch (error) {
+    // Silently fail on refresh errors - don't interrupt user
+    console.warn("Failed to refresh token data:", error.message);
   }
 }
 

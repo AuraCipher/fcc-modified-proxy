@@ -299,6 +299,93 @@ class TokenTracker:
             logger.error(f"Failed to cleanup old data: {e}")
             return 0
 
+    def export_to_json(self) -> dict:
+        """Export all token data to JSON-serializable format.
+        
+        Returns:
+            Dict with all token data, ready for JSON serialization
+        """
+        with self._data_lock:
+            return {
+                "global_total": self._total_tokens.to_dict(),
+                "by_provider": {
+                    provider: {
+                        "by_model": {
+                            model_id: stats.to_dict() 
+                            for model_id, stats in models.items()
+                        }
+                    }
+                    for provider, models in self._tokens_by_provider.items()
+                },
+                "exported_at": datetime.utcnow().isoformat(),
+            }
+
+    def import_from_json(self, data: dict) -> None:
+        """Import token data from JSON format.
+        
+        Args:
+            data: Dict with token data (from export_to_json)
+        """
+        try:
+            with self._data_lock:
+                # Load into memory structures
+                for provider_id, provider_data in data.get("by_provider", {}).items():
+                    for model_id, model_stats_dict in provider_data.get("by_model", {}).items():
+                        stats = TokenStats(
+                            input_tokens=model_stats_dict.get("input_tokens", 0),
+                            output_tokens=model_stats_dict.get("output_tokens", 0),
+                            total_tokens=model_stats_dict.get("total_tokens", 0),
+                            request_count=model_stats_dict.get("request_count", 0),
+                        )
+                        self._tokens_by_provider[provider_id][model_id] = stats
+                
+                # Update global total
+                global_data = data.get("global_total", {})
+                self._total_tokens = TokenStats(
+                    input_tokens=global_data.get("input_tokens", 0),
+                    output_tokens=global_data.get("output_tokens", 0),
+                    total_tokens=global_data.get("total_tokens", 0),
+                    request_count=global_data.get("request_count", 0),
+                )
+                
+                logger.info("Token data imported successfully")
+        except Exception as e:
+            logger.error(f"Failed to import token data: {e}")
+            raise
+
+    def backup_to_file(self, filepath: str) -> None:
+        """Backup token data to a JSON file.
+        
+        Args:
+            filepath: Path where to save the backup file
+        """
+        import json
+        try:
+            export_data = self.export_to_json()
+            with open(filepath, 'w') as f:
+                json.dump(export_data, f, indent=2)
+            logger.info(f"Token data backed up to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to backup token data: {e}")
+            raise
+
+    def restore_from_file(self, filepath: str) -> None:
+        """Restore token data from a JSON backup file.
+        
+        Args:
+            filepath: Path to the backup file to restore
+        """
+        import json
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            self.import_from_json(data)
+            logger.info(f"Token data restored from {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to restore token data from file: {e}")
+            raise
+
+
     def get_total_tokens(self) -> TokenStats:
         """Get global token statistics."""
         with self._data_lock:

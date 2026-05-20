@@ -112,8 +112,6 @@ class AppRuntime:
             start_reload_watcher(_reload_cached_settings)
             # Initialize token tracker (loads persisted data from DB)
             token_tracker = TokenTracker.get_instance()
-            # Clean up old data (older than 30 days)
-            token_tracker.cleanup_old_data(days=30)
             warn_if_process_auth_token(self.settings)
             await self._validate_configured_models_best_effort()
             self._provider_registry.start_model_list_refresh(self.settings)
