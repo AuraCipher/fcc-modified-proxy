@@ -18,6 +18,7 @@ _RUNTIME_EXTRAS = {
     "whisper_device": "cpu",
     "hf_token": "",
     "nvidia_nim_api_key": "",
+    "nvidia_nim_api_keys": (),
     "claude_cli_bin": "claude",
     "uses_process_anthropic_auth_token": lambda: False,
     "messaging_rate_limit": 1,

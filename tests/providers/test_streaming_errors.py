@@ -529,6 +529,14 @@ class TestStreamingExceptionHandling:
         ):
             # Mock execute_with_retry to pass through to the actual function
             async def _passthrough(fn, *args, **kwargs):
+                for key in (
+                    "proactive",
+                    "max_retries",
+                    "base_delay",
+                    "max_delay",
+                    "jitter",
+                ):
+                    kwargs.pop(key, None)
                 return await fn(*args, **kwargs)
 
             with patch.object(

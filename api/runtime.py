@@ -12,7 +12,8 @@ from fastapi import FastAPI
 from loguru import logger
 
 from api.admin_urls import local_admin_url
-from config.settings import Settings, get_settings
+from config.hot_reload import start_reload_watcher, stop_reload_watcher
+from config.settings import Settings, _reload_cached_settings, get_settings
 from providers.exceptions import ServiceUnavailableError
 from providers.registry import ProviderRegistry
 
@@ -106,6 +107,8 @@ class AppRuntime:
         self._provider_registry = ProviderRegistry()
         self.app.state.provider_registry = self._provider_registry
         try:
+            # Start hot-reload watcher for .env changes
+            start_reload_watcher(_reload_cached_settings)
             warn_if_process_auth_token(self.settings)
             await self._validate_configured_models_best_effort()
             self._provider_registry.start_model_list_refresh(self.settings)
@@ -114,6 +117,11 @@ class AppRuntime:
             logging.getLogger("uvicorn.error").info(
                 "Admin UI: %s (local-only)", admin_url
             )
+            nim_keys = len(self.settings.nvidia_nim_api_keys)
+            if nim_keys > 1:
+                logging.getLogger("uvicorn.error").info(
+                    "NIM: %s API keys loaded (rotation active)", nim_keys
+                )
         except Exception as exc:
             log_startup_failure(self.settings, exc)
             await best_effort(
@@ -140,6 +148,8 @@ class AppRuntime:
 
     async def shutdown(self) -> None:
         verbose = self.settings.log_api_error_tracebacks
+        # Stop hot-reload watcher first
+        stop_reload_watcher()
         if self.message_handler is not None:
             try:
                 self.message_handler.session_store.flush_pending_save()

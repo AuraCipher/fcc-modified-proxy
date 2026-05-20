@@ -9,8 +9,10 @@ included at top level for easy grep/filter.
 import json
 import logging
 import re
+import sys
 import threading
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -39,6 +41,13 @@ _AUTH_BEARER_RE = re.compile(
     r"(\bAuthorization\s*:\s*Bearer\s+)([^\s'\"]+)",
     re.IGNORECASE,
 )
+
+
+def _nim_console_log_filter(record: Any) -> bool:
+    """Mirror NIM pool status lines to the terminal without TRACE noise."""
+    if record["extra"].get(_TRACE_PAYLOAD_BINDING) is not None:
+        return False
+    return str(record["name"]).startswith("providers.nvidia_nim")
 
 
 def _redact_sensitive_substrings(message: str) -> str:
@@ -137,6 +146,15 @@ def configure_logging(
         encoding="utf-8",
         mode="a",
         rotation="50 MB",
+        enqueue=True,
+    )
+
+    # Terminal: one-line NIM API rotation status (pool, client, request helpers)
+    logger.add(
+        sys.stderr,
+        level="INFO",
+        format="{message}",
+        filter=_nim_console_log_filter,
         enqueue=True,
     )
 

@@ -106,6 +106,11 @@ def mock_rate_limiter():
 
         # execute_with_retry should call through to the actual function
         async def _passthrough(fn, *args, **kwargs):
+            kwargs.pop("proactive", None)
+            kwargs.pop("max_retries", None)
+            kwargs.pop("base_delay", None)
+            kwargs.pop("max_delay", None)
+            kwargs.pop("jitter", None)
             return await fn(*args, **kwargs)
 
         instance.execute_with_retry = AsyncMock(side_effect=_passthrough)
@@ -119,7 +124,21 @@ async def test_init(provider_config):
         provider = NvidiaNimProvider(provider_config, nim_settings=NimSettings())
         assert provider._api_key == "test_key"
         assert provider._base_url == "https://test.api.nvidia.com/v1"
+        assert provider._key_pool.slot_count == 1
         mock_openai.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_init_multi_key_pool(provider_config):
+    with patch("providers.openai_compat.AsyncOpenAI"):
+        provider = NvidiaNimProvider(
+            provider_config,
+            nim_settings=NimSettings(),
+            api_keys=("key-one", "key-two"),
+            key_switch_delay_sec=0.0,
+        )
+        assert provider._key_pool.slot_count == 2
+        assert provider._key_pool.primary_api_key == "key-one"
 
 
 @pytest.mark.asyncio

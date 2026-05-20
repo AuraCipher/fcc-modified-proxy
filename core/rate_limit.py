@@ -30,6 +30,20 @@ class StrictSlidingWindowLimiter:
         self._times: deque[float] = deque()
         self._lock = asyncio.Lock()
 
+    async def reset(self) -> None:
+        """Drop all timestamps (idle quarantine until window is logically empty)."""
+        async with self._lock:
+            self._times.clear()
+
+    async def is_full(self) -> bool:
+        """Return whether the next ``acquire`` would need to wait."""
+        async with self._lock:
+            now = time.monotonic()
+            cutoff = now - self._rate_window
+            while self._times and self._times[0] <= cutoff:
+                self._times.popleft()
+            return len(self._times) >= self._rate_limit
+
     async def acquire(self) -> None:
         while True:
             wait_time = 0.0

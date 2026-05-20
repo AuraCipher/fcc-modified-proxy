@@ -3,7 +3,6 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +78,33 @@ def _env_file_override(model_config: Mapping[str, Any], key: str) -> str | None:
     return configured_value
 
 
+def _nim_numbered_api_key_env_name(index: int) -> str:
+    return f"NVIDIA_NIM_API_KEY{index}"
+
+
+def _resolve_env_value(model_config: Mapping[str, Any], key: str) -> str | None:
+    """Return a configured value from process env or dotenv files."""
+    if key in os.environ:
+        return os.environ[key]
+    return _env_file_override(model_config, key)
+
+
+def numbered_nvidia_nim_api_keys(model_config: Mapping[str, Any]) -> tuple[str, ...]:
+    """Load ``NVIDIA_NIM_API_KEY1``, ``KEY2``, … until the first missing index."""
+    keys: list[str] = []
+    index = 1
+    while True:
+        raw = _resolve_env_value(model_config, _nim_numbered_api_key_env_name(index))
+        if raw is None:
+            break
+        stripped = raw.strip()
+        if not stripped:
+            break
+        keys.append(stripped)
+        index += 1
+    return tuple(keys)
+
+
 def _removed_env_var_message(model_config: Mapping[str, Any]) -> str | None:
     """Return a migration error for removed env vars, if present."""
     removed_keys = ("NIM_ENABLE_THINKING", "ENABLE_THINKING")
@@ -141,7 +167,20 @@ class Settings(BaseSettings):
     )
 
     # ==================== NVIDIA NIM Config ====================
-    nvidia_nim_api_key: str = ""
+    nvidia_nim_api_key: str = Field(default="", validation_alias="NVIDIA_NIM_API_KEY")
+    nvidia_nim_api_keys: tuple[str, ...] = ()
+    nvidia_nim_rpm_per_key: int = Field(
+        default=35, validation_alias="NVIDIA_NIM_RPM_PER_KEY"
+    )
+    nvidia_nim_key_window_sec: float = Field(
+        default=60.0, validation_alias="NVIDIA_NIM_KEY_WINDOW_SEC"
+    )
+    nvidia_nim_key_cooldown_sec: float = Field(
+        default=65.0, validation_alias="NVIDIA_NIM_KEY_COOLDOWN_SEC"
+    )
+    nvidia_nim_key_switch_delay_sec: float = Field(
+        default=5.0, validation_alias="NVIDIA_NIM_KEY_SWITCH_DELAY_SEC"
+    )
 
     # ==================== LM Studio Config ====================
     lm_studio_base_url: str = Field(
@@ -430,16 +469,53 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid provider: '{provider}'. Supported: {supported}")
         return v
 
+    @field_validator("nvidia_nim_rpm_per_key")
+    @classmethod
+    def validate_nvidia_nim_rpm_per_key(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("nvidia_nim_rpm_per_key must be > 0")
+        return v
+
+    @field_validator(
+        "nvidia_nim_key_window_sec",
+        "nvidia_nim_key_cooldown_sec",
+    )
+    @classmethod
+    def validate_nvidia_nim_positive_float(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("NVIDIA NIM key timing values must be > 0")
+        return v
+
+    @field_validator("nvidia_nim_key_switch_delay_sec")
+    @classmethod
+    def validate_nvidia_nim_switch_delay(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("nvidia_nim_key_switch_delay_sec must be >= 0")
+        return v
+
+    @model_validator(mode="after")
+    def sync_nvidia_nim_api_keys(self) -> Settings:
+        """Collect numbered keys or fall back to the legacy single key."""
+        numbered = numbered_nvidia_nim_api_keys(self.model_config)
+        if numbered:
+            self.nvidia_nim_api_keys = numbered
+            if not self.nvidia_nim_api_key.strip():
+                self.nvidia_nim_api_key = numbered[0]
+        else:
+            primary = self.nvidia_nim_api_key.strip()
+            self.nvidia_nim_api_keys = (primary,) if primary else ()
+        return self
+
     @model_validator(mode="after")
     def check_nvidia_nim_api_key(self) -> Settings:
         if (
             self.voice_note_enabled
             and self.whisper_device == "nvidia_nim"
-            and not self.nvidia_nim_api_key.strip()
+            and not self.nvidia_nim_api_keys
         ):
             raise ValueError(
-                "NVIDIA_NIM_API_KEY is required when WHISPER_DEVICE is 'nvidia_nim'. "
-                "Set it in your .env file."
+                "NVIDIA_NIM_API_KEY (or NVIDIA_NIM_API_KEY1, …) is required when "
+                "WHISPER_DEVICE is 'nvidia_nim'. Set it in your .env file."
             )
         return self
 
@@ -542,7 +618,36 @@ class Settings(BaseSettings):
     )
 
 
-@lru_cache
+# Cached settings instance (replacement for @lru_cache to support hot-reload)
+_cached_settings: Settings | None = None
+
+
+def _reload_cached_settings() -> None:
+    """Reload settings from environment (called by hot-reload manager)."""
+    global _cached_settings
+    _cached_settings = Settings()
+
+
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get settings instance (reloaded when .env changes).
+
+    On first call, loads and caches settings. Subsequent calls return cached
+    version until hot-reload manager triggers a reload via _reload_cached_settings().
+    """
+    global _cached_settings
+    if _cached_settings is None:
+        _cached_settings = Settings()
+    return _cached_settings
+
+
+def cache_clear() -> None:
+    """Clear cached settings (for testing and manual refresh).
+
+    This method maintains compatibility with @lru_cache interface.
+    """
+    global _cached_settings
+    _cached_settings = None
+
+
+# Attach cache_clear as a method for lru_cache compatibility
+get_settings.cache_clear = cache_clear  # type: ignore

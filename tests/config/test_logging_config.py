@@ -97,6 +97,25 @@ def test_httpx_logger_quieted_when_not_verbose_third_party(tmp_path) -> None:
     assert logging.getLogger("httpcore").level >= logging.WARNING
 
 
+def test_nim_pool_logs_use_console_filter(tmp_path) -> None:
+    """NIM rotation messages are eligible for the stderr one-line sink."""
+    from config.logging_config import _nim_console_log_filter
+
+    assert _nim_console_log_filter(
+        {"name": "providers.nvidia_nim.key_pool", "extra": {}, "message": "Using API 1"}
+    )
+    assert not _nim_console_log_filter(
+        {
+            "name": "core.trace",
+            "extra": {"trace_payload": {"event": "x"}},
+            "message": "TRACE provider.request.sent",
+        }
+    )
+    assert not _nim_console_log_filter(
+        {"name": "providers.open_router.client", "extra": {}, "message": "other"}
+    )
+
+
 def test_httpx_resets_to_notset_when_verbose_third_party(tmp_path) -> None:
     log_file = str(tmp_path / "verbose.log")
     configure_logging(log_file, force=True, verbose_third_party=True)

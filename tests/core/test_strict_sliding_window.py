@@ -8,6 +8,16 @@ from core.rate_limit import StrictSlidingWindowLimiter
 
 
 @pytest.mark.asyncio
+async def test_strict_window_is_full_matches_capacity():
+    lim = StrictSlidingWindowLimiter(rate_limit=2, rate_window=0.2)
+    assert not await lim.is_full()
+    await lim.acquire()
+    assert not await lim.is_full()
+    await lim.acquire()
+    assert await lim.is_full()
+
+
+@pytest.mark.asyncio
 async def test_strict_window_allows_burst_then_blocks():
     lim = StrictSlidingWindowLimiter(rate_limit=2, rate_window=0.2)
     await lim.acquire()
@@ -29,6 +39,16 @@ async def test_strict_window_async_context_manager():
     start = time.monotonic()
     await run()
     assert time.monotonic() - start >= 0.1
+
+
+@pytest.mark.asyncio
+async def test_strict_window_reset_clears_backlog():
+    lim = StrictSlidingWindowLimiter(rate_limit=2, rate_window=0.2)
+    await lim.acquire()
+    await lim.acquire()
+    assert await lim.is_full()
+    await lim.reset()
+    assert not await lim.is_full()
 
 
 def test_strict_window_rejects_invalid_config():

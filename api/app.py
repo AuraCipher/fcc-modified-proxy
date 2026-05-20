@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 from starlette.types import Receive, Scope, Send
 
+from config.hot_reload import get_reload_manager
 from config.logging_config import configure_logging
 from config.paths import server_log_path
 from config.settings import get_settings
@@ -96,6 +97,17 @@ def create_app(*, lifespan_enabled: bool = True) -> FastAPI:
     if lifespan_enabled:
         app_kwargs["lifespan"] = lifespan
     app = FastAPI(**app_kwargs)
+
+    @app.middleware("http")
+    async def track_active_requests(request: Request, call_next):
+        """Track active requests for hot-reload coordination."""
+        reload_mgr = get_reload_manager()
+        reload_mgr.register_request_start()
+        try:
+            response = await call_next(request)
+        finally:
+            reload_mgr.register_request_end()
+        return response
 
     @app.middleware("http")
     async def trace_http_correlation(request: Request, call_next):

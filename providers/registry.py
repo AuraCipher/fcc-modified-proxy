@@ -32,10 +32,37 @@ ProviderFactory = Callable[[ProviderConfig, Settings], BaseProvider]
 PROVIDER_DESCRIPTORS: dict[str, ProviderDescriptor] = PROVIDER_CATALOG
 
 
+def _nim_pool_int_setting(settings: Settings, attr: str, default: int) -> int:
+    value = getattr(settings, attr, default)
+    return value if isinstance(value, int) else default
+
+
+def _nim_pool_float_setting(settings: Settings, attr: str, default: float) -> float:
+    value = getattr(settings, attr, default)
+    return value if isinstance(value, (int, float)) else default
+
+
 def _create_nvidia_nim(config: ProviderConfig, settings: Settings) -> BaseProvider:
     from providers.nvidia_nim import NvidiaNimProvider
 
-    return NvidiaNimProvider(config, nim_settings=settings.nim)
+    api_keys = settings.nvidia_nim_api_keys
+    if not isinstance(api_keys, tuple) or not api_keys:
+        api_keys = (config.api_key,) if config.api_key else ()
+    return NvidiaNimProvider(
+        config,
+        nim_settings=settings.nim,
+        api_keys=api_keys,
+        rpm_per_key=_nim_pool_int_setting(settings, "nvidia_nim_rpm_per_key", 35),
+        key_window_sec=_nim_pool_float_setting(
+            settings, "nvidia_nim_key_window_sec", 60.0
+        ),
+        key_cooldown_sec=_nim_pool_float_setting(
+            settings, "nvidia_nim_key_cooldown_sec", 65.0
+        ),
+        key_switch_delay_sec=_nim_pool_float_setting(
+            settings, "nvidia_nim_key_switch_delay_sec", 5.0
+        ),
+    )
 
 
 def _create_open_router(config: ProviderConfig, _settings: Settings) -> BaseProvider:
