@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import Settings
 from config.settings import get_settings as get_cached_settings
+from core.token_tracking import get_token_tracker
 from providers.registry import ProviderRegistry
 
 from .admin_config import (
@@ -285,3 +286,114 @@ async def _check_local_provider(
             "base_url": base_url,
             "error_type": type(exc).__name__,
         }
+
+
+# =============================================================================
+# Token Tracking API Endpoints
+# =============================================================================
+
+
+@router.get("/admin/api/tokens")
+async def get_token_stats():
+    """Get comprehensive token usage report with provider/model breakdown."""
+    tracker = get_token_tracker()
+    return tracker.get_report()
+
+
+@router.get("/admin/api/tokens/total")
+async def get_total_tokens():
+    """Get global token statistics."""
+    tracker = get_token_tracker()
+    total = tracker.get_total_tokens()
+    return total.to_dict()
+
+
+@router.get("/admin/api/tokens/provider/{provider_id}")
+async def get_provider_tokens(provider_id: str):
+    """Get token statistics for a specific provider."""
+    tracker = get_token_tracker()
+    provider_stats = tracker.get_provider_total(provider_id)
+    if provider_stats is None:
+        raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
+    return provider_stats.to_dict()
+
+
+@router.get("/admin/api/tokens/provider/{provider_id}/models")
+async def get_provider_model_tokens(provider_id: str):
+    """Get token statistics broken down by model within a provider."""
+    tracker = get_token_tracker()
+    models = tracker.get_provider_models(provider_id)
+    if models is None:
+        raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
+    
+    return {
+        "provider_id": provider_id,
+        "models": {model_id: stats.to_dict() for model_id, stats in models.items()},
+    }
+
+
+@router.get("/admin/api/tokens/hierarchy")
+async def get_tokens_hierarchy():
+    """Get complete hierarchical view: All Providers -> Models -> Stats."""
+    tracker = get_token_tracker()
+    all_providers = tracker.get_all_providers()
+    
+    hierarchy = {}
+    for provider_id, models in all_providers.items():
+        # Calculate provider total
+        provider_input = sum(m.input_tokens for m in models.values())
+        provider_output = sum(m.output_tokens for m in models.values())
+        provider_total = provider_input + provider_output
+        provider_requests = sum(m.request_count for m in models.values())
+        
+        hierarchy[provider_id] = {
+            "total": {
+                "input_tokens": provider_input,
+                "output_tokens": provider_output,
+                "total_tokens": provider_total,
+                "request_count": provider_requests,
+            },
+            "models": {
+                model_id: stats.to_dict() for model_id, stats in models.items()
+            },
+        }
+    
+    return {
+        "global_total": tracker.get_total_tokens().to_dict(),
+        "by_provider": hierarchy,
+    }
+
+
+@router.get("/admin/api/tokens/model/{model_name}")
+async def get_model_across_providers(model_name: str):
+    """Get usage of a specific model across all providers."""
+    tracker = get_token_tracker()
+    usage = tracker.get_model_across_providers(model_name)
+    if not usage:
+        raise HTTPException(
+            status_code=404, detail=f"Model {model_name} not found in any provider"
+        )
+    
+    return {
+        "model_name": model_name,
+        "providers": {key: stats.to_dict() for key, stats in usage.items()},
+    }
+
+
+@router.get("/admin/api/tokens/history")
+async def get_token_history(hours_back: int = 24):
+    """Get token usage history by hour for trending."""
+    tracker = get_token_tracker()
+    history = tracker.get_time_window_stats(hours_back=hours_back)
+    return {
+        "period_hours": hours_back,
+        "hourly": history,
+    }
+
+
+@router.post("/admin/api/tokens/reset")
+async def reset_token_tracker():
+    """Reset all token tracking (for testing/debugging)."""
+    tracker = get_token_tracker()
+    tracker.clear()
+    return {"status": "cleared", "message": "Token tracker has been reset"}

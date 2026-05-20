@@ -29,6 +29,13 @@ const VIEW_GROUPS = [
     sections: ["messaging", "voice"],
     containerId: "messagingSections",
   },
+  {
+    id: "tokens",
+    label: "Token Usage",
+    title: "Token Usage",
+    sections: [],
+    containerId: "tokenTracking",
+  },
 ];
 
 const byId = (id) => document.getElementById(id);
@@ -151,6 +158,11 @@ function setActiveView(viewId, { scroll = false } = {}) {
     view.classList.toggle("active", selected);
     view.hidden = !selected;
   });
+
+  // Load token data when switching to tokens view
+  if (activeView.id === "tokens") {
+    loadTokenData();
+  }
 
   if (scroll) {
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -487,8 +499,96 @@ function showMessage(message, kind = "") {
   area.className = `message-area ${kind}`.trim();
 }
 
+// Token tracking functions
+async function loadTokenData() {
+  showMessage("Loading token data...");
+  try {
+    const data = await api("/admin/api/tokens/hierarchy");
+    renderTokenData(data);
+    showMessage("Token data loaded");
+  } catch (error) {
+    showMessage(`Failed to load token data: ${error.message}`, "error");
+  }
+}
+
+function renderTokenData(data) {
+  // Render global totals
+  const total = data.global_total;
+  byId("totalTokensValue").textContent = total.total_tokens.toLocaleString();
+  byId("totalRequestsValue").textContent = total.request_count.toLocaleString();
+  const avgTokens = total.request_count > 0 
+    ? Math.round(total.total_tokens / total.request_count)
+    : 0;
+  byId("avgTokensValue").textContent = avgTokens.toLocaleString();
+
+  // Render by provider
+  const providerContainer = byId("tokensByProvider");
+  providerContainer.innerHTML = "";
+  
+  Object.entries(data.by_provider).forEach(([providerId, providerData]) => {
+    const card = document.createElement("div");
+    card.className = "provider-token-card";
+    
+    const providerTotal = providerData.total;
+    const inputPercent = total.input_tokens > 0 
+      ? (providerTotal.input_tokens / total.input_tokens * 100).toFixed(1)
+      : 0;
+    const outputPercent = total.output_tokens > 0 
+      ? (providerTotal.output_tokens / total.output_tokens * 100).toFixed(1)
+      : 0;
+    
+    card.innerHTML = `
+      <div class="token-card-header">
+        <h5>${providerName(providerId)}</h5>
+      </div>
+      <div class="token-metrics">
+        <div class="metric">
+          <span class="metric-label">Input Tokens</span>
+          <span class="metric-value">${providerTotal.input_tokens.toLocaleString()}</span>
+          <span class="metric-percent">${inputPercent}%</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Output Tokens</span>
+          <span class="metric-value">${providerTotal.output_tokens.toLocaleString()}</span>
+          <span class="metric-percent">${outputPercent}%</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Total Tokens</span>
+          <span class="metric-value">${providerTotal.total_tokens.toLocaleString()}</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Requests</span>
+          <span class="metric-value">${providerTotal.request_count.toLocaleString()}</span>
+        </div>
+      </div>
+      <details class="model-details">
+        <summary>Models (${Object.keys(providerData.models).length})</summary>
+        <div class="model-list"></div>
+      </details>
+    `;
+    
+    const modelList = card.querySelector(".model-list");
+    Object.entries(providerData.models).forEach(([modelId, modelData]) => {
+      const modelRow = document.createElement("div");
+      modelRow.className = "model-row";
+      modelRow.innerHTML = `
+        <span class="model-name">${modelId}</span>
+        <span class="model-tokens">
+          I: ${modelData.input_tokens.toLocaleString()} | 
+          O: ${modelData.output_tokens.toLocaleString()} | 
+          R: ${modelData.request_count}
+        </span>
+      `;
+      modelList.appendChild(modelRow);
+    });
+    
+    providerContainer.appendChild(card);
+  });
+}
+
 byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);
+byId("refreshTokensButton")?.addEventListener("click", loadTokenData);
 
 load().catch((error) => {
   showMessage(error.message, "error");

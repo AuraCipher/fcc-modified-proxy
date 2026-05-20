@@ -14,6 +14,7 @@ from loguru import logger
 from config.settings import Settings
 from core.anthropic import get_token_count, get_user_facing_error_message
 from core.anthropic.sse import ANTHROPIC_SSE_RESPONSE_HEADERS
+from core.token_tracking import get_token_tracker
 from core.trace import api_messages_request_snapshot, trace_event, traced_async_stream
 from providers.base import BaseProvider
 from providers.exceptions import InvalidRequestError, ProviderError
@@ -82,6 +83,35 @@ def _log_unexpected_service_exception(
 def _require_non_empty_messages(messages: list[Any]) -> None:
     if not messages:
         raise InvalidRequestError("messages cannot be empty")
+
+
+async def _stream_and_track_tokens(
+    streamed: AsyncIterator[str],
+    provider_id: str,
+    model_id: str,
+) -> AsyncIterator[str]:
+    """Pass through SSE stream and track token usage on completion."""
+    import json
+    tracker = get_token_tracker()
+    output_tokens = 0
+    
+    async for chunk in streamed:
+        # Extract output_tokens from message_delta events
+        if '"message_delta"' in chunk and '"output_tokens"' in chunk:
+            try:
+                lines = chunk.split('\n')
+                for line in lines:
+                    if line.startswith('data: '):
+                        data = json.loads(line[6:])
+                        if data.get('type') == 'message_delta':
+                            output_tokens = data.get('usage', {}).get('output_tokens', 0)
+            except Exception:
+                pass
+        yield chunk
+    
+    # Track output tokens after stream completes
+    if output_tokens > 0:
+        tracker.add_tokens(provider_id, model_id, 0, output_tokens)
 
 
 class ClaudeProxyService:
@@ -187,6 +217,15 @@ class ClaudeProxyService:
                     routed.request.tools,
                 )
 
+                # Track input tokens
+                tracker = get_token_tracker()
+                tracker.add_tokens(
+                    routed.resolved.provider_id,
+                    routed.resolved.provider_model,
+                    input_tokens,
+                    0,
+                )
+
                 streamed = traced_async_stream(
                     provider.stream_response(
                         routed.request,
@@ -205,7 +244,14 @@ class ClaudeProxyService:
                         "gateway_model": routed.request.model,
                     },
                 )
-                return anthropic_sse_streaming_response(streamed)
+                
+                # Wrap stream to track output tokens
+                tracked_stream = _stream_and_track_tokens(
+                    streamed,
+                    routed.resolved.provider_id,
+                    routed.resolved.provider_model,
+                )
+                return anthropic_sse_streaming_response(tracked_stream)
 
         except ProviderError:
             raise

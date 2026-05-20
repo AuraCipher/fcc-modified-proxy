@@ -57,6 +57,40 @@
               aria-label="Messaging configuration"
             ></div>
           </section>
+
+          <section id="view-tokens" class="admin-view" data-view="tokens" hidden>
+            <div class="token-tracking-section">
+              <div class="section-header">
+                <h3>Token Usage Analytics</h3>
+                <button id="refreshTokensButton" class="secondary-button" type="button">Refresh</button>
+              </div>
+              
+              <div class="token-summary">
+                <div class="summary-card">
+                  <div class="summary-label">Total Tokens</div>
+                  <div class="summary-value" id="totalTokensValue">-</div>
+                </div>
+                <div class="summary-card">
+                  <div class="summary-label">Total Requests</div>
+                  <div class="summary-value" id="totalRequestsValue">-</div>
+                </div>
+                <div class="summary-card">
+                  <div class="summary-label">Avg Tokens/Request</div>
+                  <div class="summary-value" id="avgTokensValue">-</div>
+                </div>
+              </div>
+
+              <div class="token-breakdown">
+                <h4>By Provider</h4>
+                <div id="tokensByProvider" class="provider-breakdown"></div>
+              </div>
+
+              <div class="token-detail">
+                <h4>Provider Details</h4>
+                <div id="tokensByModel" class="model-breakdown"></div>
+              </div>
+            </div>
+          </section>
         </div>
       </main>
 
