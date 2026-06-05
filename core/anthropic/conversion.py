@@ -569,6 +569,29 @@ def build_base_request_body(
         if system_msg:
             messages.insert(0, system_msg)
 
+    # Defensive post-processing: Ensure no stray system messages remain
+    # beyond index 0, which would cause OpenAI-compatible endpoints to reject the request.
+    # This handles edge cases where malformed history might contain system role messages.
+    from loguru import logger
+
+    filtered_messages = []
+    system_messages_found = []
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "system" and i > 0:
+            system_messages_found.append(i)
+        else:
+            filtered_messages.append(msg)
+
+    if system_messages_found:
+        logger.warning(
+            "Sanitized unexpected system role messages at indices {}: {} input messages "
+            "resulted in {} output messages",
+            system_messages_found,
+            len(messages),
+            len(filtered_messages),
+        )
+        messages = filtered_messages
+
     body: dict[str, Any] = {"model": request_data.model, "messages": messages}
 
     max_tokens = getattr(request_data, "max_tokens", None)

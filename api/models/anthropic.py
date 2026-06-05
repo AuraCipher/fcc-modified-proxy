@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # =============================================================================
@@ -92,7 +92,7 @@ class SystemContent(_AnthropicBlockBase):
 # Message Types
 # =============================================================================
 class Message(BaseModel):
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: (
         str
         | list[
@@ -155,6 +155,47 @@ class MessagesRequest(BaseModel):
     extra_body: dict[str, Any] | None = None
     # Beta feature flags sent by Claude Code as a body field; accepted but never forwarded.
     betas: list[str] | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _extract_system_messages(self) -> MessagesRequest:
+        """Move any `role: 'system'` messages from `messages` into top-level `system`.
+
+        This handles clients (CLI/extension) that incorrectly place system prompts
+        inside the messages array. We concatenate multiple system entries into a
+        single string separated by double newlines.
+        """
+        msgs = self.messages or []
+        system_parts: list[str] = []
+        new_messages: list[Message] = []
+
+        for m in msgs:
+            if m.role == "system":
+                content = m.content
+                if isinstance(content, str):
+                    system_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        text = getattr(block, "text", None) or (
+                            block.get("text") if isinstance(block, dict) else None
+                        )
+                        if isinstance(text, str) and text:
+                            system_parts.append(text)
+            else:
+                new_messages.append(m)
+
+        if system_parts:
+            combined = "\n\n".join(part for part in system_parts if part)
+            existing = self.system
+            if existing:
+                if isinstance(existing, str):
+                    self.system = f"{existing}\n\n{combined}"
+                else:
+                    self.system = combined
+            else:
+                self.system = combined
+            self.messages = new_messages
+
+        return self
 
 
 class TokenCountRequest(BaseModel):
