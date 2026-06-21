@@ -450,6 +450,55 @@ class TokenTracker:
                 for provider, models in self._tokens_by_provider.items()
             }
 
+    def get_hierarchy_since(
+        self, cutoff: datetime | None = None
+    ) -> dict[str, dict[str, TokenStats]]:
+        """Get provider/model hierarchy filtered by time period from the database.
+
+        Queries the SQLite ``token_usage`` table for records ``>= cutoff``,
+        aggregates by provider and model, and returns the same format as
+        :meth:`get_all_providers`.
+
+        Args:
+            cutoff: Only include records at or after this timestamp.
+                    ``None`` means all time (falls back to in-memory data).
+
+        Returns:
+            Same shape as :meth:`get_all_providers`:
+            ``{provider_id: {model_id: TokenStats, ...}, ...}``
+        """
+        if cutoff is None:
+            return self.get_all_providers()
+
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT provider_id, model_id,
+                           SUM(input_tokens), SUM(output_tokens),
+                           SUM(request_count)
+                    FROM token_usage
+                    WHERE recorded_at >= ?
+                    GROUP BY provider_id, model_id
+                    ORDER BY provider_id, model_id
+                    """,
+                    (cutoff,),
+                )
+
+                hierarchy: dict[str, dict[str, TokenStats]] = {}
+                for provider_id, model_id, input_t, output_t, req_count in cursor:
+                    stats = TokenStats()
+                    stats.input_tokens = input_t or 0
+                    stats.output_tokens = output_t or 0
+                    stats.total_tokens = (input_t or 0) + (output_t or 0)
+                    stats.request_count = req_count or 0
+                    hierarchy.setdefault(provider_id, {})[model_id] = stats
+
+                return hierarchy
+        except Exception as e:
+            logger.error(f"Failed to query time-filtered hierarchy: {e}")
+            return {}
+
     def get_report(self) -> dict:
         """Get comprehensive token usage report.
 

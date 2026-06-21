@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -334,18 +334,33 @@ async def get_provider_model_tokens(provider_id: str):
 
 
 @router.get("/admin/api/tokens/hierarchy")
-async def get_tokens_hierarchy():
-    """Get complete hierarchical view: All Providers -> Models -> Stats."""
+async def get_tokens_hierarchy(period: str = "all"):
+    """Get complete hierarchical view: All Providers -> Models -> Stats.
+
+    Args:
+        period: Time filter — ``all``, ``7d``, ``weekly``, ``monthly``, or ``yearly``.
+    """
     tracker = get_token_tracker()
-    all_providers = tracker.get_all_providers()
+
+    # Parse period to cutoff datetime
+    cutoff = _parse_period_cutoff(period)
+    all_providers = tracker.get_hierarchy_since(cutoff)
 
     hierarchy = {}
+    grand_input = 0
+    grand_output = 0
+    grand_requests = 0
+
     for provider_id, models in all_providers.items():
         # Calculate provider total
         provider_input = sum(m.input_tokens for m in models.values())
         provider_output = sum(m.output_tokens for m in models.values())
         provider_total = provider_input + provider_output
         provider_requests = sum(m.request_count for m in models.values())
+
+        grand_input += provider_input
+        grand_output += provider_output
+        grand_requests += provider_requests
 
         hierarchy[provider_id] = {
             "total": {
@@ -357,10 +372,53 @@ async def get_tokens_hierarchy():
             "models": {model_id: stats.to_dict() for model_id, stats in models.items()},
         }
 
+    grand_total = grand_input + grand_output
+
     return {
-        "global_total": tracker.get_total_tokens().to_dict(),
+        "global_total": {
+            "input_tokens": grand_input,
+            "output_tokens": grand_output,
+            "total_tokens": grand_total,
+            "request_count": grand_requests,
+            "avg_tokens_per_request": (
+                grand_total // grand_requests if grand_requests > 0 else 0
+            ),
+            "last_updated": datetime.utcnow().isoformat(),
+        },
         "by_provider": hierarchy,
+        "period": period,
     }
+
+
+# Period helpers
+
+
+def _parse_period_cutoff(period: str) -> datetime | None:
+    """Convert a period string to a UTC cutoff datetime.
+
+    Returns ``None`` for ``"all"`` (no filter).
+    """
+    now = datetime.utcnow()
+    p = period.strip().lower()
+
+    if p == "all":
+        return None
+    if p == "7d":
+        return now - timedelta(days=7)
+    if p == "weekly":
+        # Monday 00:00 of the current week
+        days_since_monday = now.weekday()  # Monday = 0
+        return (now - timedelta(days=days_since_monday)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    if p == "monthly":
+        # 1st of current month 00:00
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if p == "yearly":
+        # Jan 1st of current year 00:00
+        return now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    return None
 
 
 @router.get("/admin/api/tokens/model/{model_name}")

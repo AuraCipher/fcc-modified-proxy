@@ -4,7 +4,8 @@ const state = {
   localStatus: new Map(),
   modelOptions: [],
   activeView: "providers",
-  tokenAutoRefreshInterval: null,  // Auto-refresh interval for token usage view
+  tokenAutoRefreshInterval: null, // Auto-refresh interval for token usage view
+  tokenPeriod: "all", // Current time filter for token usage
 };
 
 const MASKED_SECRET = "********";
@@ -50,7 +51,9 @@ function sourceLabel(source) {
     explicit_env_file: "FCC_ENV_FILE",
     process: "process env",
   };
-  return Object.prototype.hasOwnProperty.call(labels, source) ? labels[source] : source;
+  return Object.prototype.hasOwnProperty.call(labels, source)
+    ? labels[source]
+    : source;
 }
 
 function sourceText(field) {
@@ -206,7 +209,9 @@ function renderProviders(providerStatus) {
     button.type = "button";
     button.className = "test-button";
     button.textContent = provider.kind === "local" ? "Test" : "Refresh models";
-    button.addEventListener("click", () => testProvider(provider.provider_id, button));
+    button.addEventListener("click", () =>
+      testProvider(provider.provider_id, button),
+    );
 
     card.append(title, meta, button);
     grid.appendChild(card);
@@ -397,7 +402,9 @@ function changedValues() {
 function updateDirtyState() {
   const count = Object.keys(changedValues()).length;
   byId("dirtyState").textContent =
-    count === 0 ? "No changes" : `${count} unsaved change${count === 1 ? "" : "s"}`;
+    count === 0
+      ? "No changes"
+      : `${count} unsaved change${count === 1 ? "" : "s"}`;
   byId("applyButton").disabled = count === 0;
 }
 
@@ -438,7 +445,9 @@ async function apply() {
     }, 1600);
     return;
   }
-  const pending = restart.required ? restart.fields || [] : result.pending_fields || [];
+  const pending = restart.required
+    ? restart.fields || []
+    : result.pending_fields || [];
   await load();
   showMessage(
     pending.length
@@ -455,7 +464,12 @@ async function refreshLocalStatus() {
     const meta = provider.status_code
       ? `${provider.base_url} returned HTTP ${provider.status_code}`
       : provider.base_url;
-    updateProviderCard(provider.provider_id, provider.status, provider.label, meta);
+    updateProviderCard(
+      provider.provider_id,
+      provider.status,
+      provider.label,
+      meta,
+    );
   });
 }
 
@@ -483,7 +497,12 @@ async function testProvider(providerId, button) {
       ).sort();
       syncModelDatalist();
     } else {
-      updateProviderCard(providerId, "offline", result.error_type, result.error_type);
+      updateProviderCard(
+        providerId,
+        "offline",
+        result.error_type,
+        result.error_type,
+      );
     }
   } finally {
     button.disabled = false;
@@ -499,7 +518,9 @@ function syncModelDatalist() {
     document.body.appendChild(datalist);
   }
   datalist.innerHTML = "";
-  state.modelOptions.forEach((model) => datalist.appendChild(option(model, model)));
+  state.modelOptions.forEach((model) =>
+    datalist.appendChild(option(model, model)),
+  );
 }
 
 function showMessage(message, kind = "") {
@@ -512,7 +533,8 @@ function showMessage(message, kind = "") {
 async function loadTokenData() {
   showMessage("Loading token data...");
   try {
-    const data = await api("/admin/api/tokens/hierarchy");
+    const period = state.tokenPeriod;
+    const data = await api(`/admin/api/tokens/hierarchy?period=${period}`);
     renderTokenData(data);
     showMessage("Token data loaded");
   } catch (error) {
@@ -523,7 +545,8 @@ async function loadTokenData() {
 // Load token data silently (for auto-refresh every 30 seconds)
 async function loadTokenDataSilent() {
   try {
-    const data = await api("/admin/api/tokens/hierarchy");
+    const period = state.tokenPeriod;
+    const data = await api(`/admin/api/tokens/hierarchy?period=${period}`);
     renderTokenData(data);
     // Silently update - only show status in subtle way
     const now = new Date().toLocaleTimeString();
@@ -540,27 +563,30 @@ function renderTokenData(data) {
   const total = data.global_total;
   byId("totalTokensValue").textContent = total.total_tokens.toLocaleString();
   byId("totalRequestsValue").textContent = total.request_count.toLocaleString();
-  const avgTokens = total.request_count > 0 
-    ? Math.round(total.total_tokens / total.request_count)
-    : 0;
+  const avgTokens =
+    total.request_count > 0
+      ? Math.round(total.total_tokens / total.request_count)
+      : 0;
   byId("avgTokensValue").textContent = avgTokens.toLocaleString();
 
   // Render by provider
   const providerContainer = byId("tokensByProvider");
   providerContainer.innerHTML = "";
-  
+
   Object.entries(data.by_provider).forEach(([providerId, providerData]) => {
     const card = document.createElement("div");
     card.className = "provider-token-card";
-    
+
     const providerTotal = providerData.total;
-    const inputPercent = total.input_tokens > 0 
-      ? (providerTotal.input_tokens / total.input_tokens * 100).toFixed(1)
-      : 0;
-    const outputPercent = total.output_tokens > 0 
-      ? (providerTotal.output_tokens / total.output_tokens * 100).toFixed(1)
-      : 0;
-    
+    const inputPercent =
+      total.input_tokens > 0
+        ? ((providerTotal.input_tokens / total.input_tokens) * 100).toFixed(1)
+        : 0;
+    const outputPercent =
+      total.output_tokens > 0
+        ? ((providerTotal.output_tokens / total.output_tokens) * 100).toFixed(1)
+        : 0;
+
     card.innerHTML = `
       <div class="token-card-header">
         <h5>${providerName(providerId)}</h5>
@@ -590,7 +616,7 @@ function renderTokenData(data) {
         <div class="model-list"></div>
       </details>
     `;
-    
+
     const modelList = card.querySelector(".model-list");
     Object.entries(providerData.models).forEach(([modelId, modelData]) => {
       const modelRow = document.createElement("div");
@@ -598,14 +624,14 @@ function renderTokenData(data) {
       modelRow.innerHTML = `
         <span class="model-name">${modelId}</span>
         <span class="model-tokens">
-          I: ${modelData.input_tokens.toLocaleString()} | 
-          O: ${modelData.output_tokens.toLocaleString()} | 
+          I: ${modelData.input_tokens.toLocaleString()} |
+          O: ${modelData.output_tokens.toLocaleString()} |
           R: ${modelData.request_count}
         </span>
       `;
       modelList.appendChild(modelRow);
     });
-    
+
     providerContainer.appendChild(card);
   });
 }
@@ -613,6 +639,10 @@ function renderTokenData(data) {
 byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);
 byId("refreshTokensButton")?.addEventListener("click", loadTokenData);
+byId("tokenPeriodFilter")?.addEventListener("change", (e) => {
+  state.tokenPeriod = e.target.value;
+  loadTokenData();
+});
 
 load().catch((error) => {
   showMessage(error.message, "error");
