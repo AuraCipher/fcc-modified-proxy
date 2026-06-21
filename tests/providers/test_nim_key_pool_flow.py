@@ -134,7 +134,9 @@ async def test_provider_create_stream_flow_rotates_mock_clients(provider_config)
         return client
 
     with patch("providers.openai_compat.AsyncOpenAI") as mock_openai_cls:
-        mock_openai_cls.side_effect = lambda **kwargs: _install_client(kwargs["api_key"])
+        mock_openai_cls.side_effect = lambda **kwargs: _install_client(
+            kwargs["api_key"]
+        )
 
         provider = NvidiaNimProvider(
             provider_config,

@@ -150,7 +150,7 @@ class NimApiKeyPool:
             return None
         try:
             parsed = float(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         if parsed <= 0:
             return None

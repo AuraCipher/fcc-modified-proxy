@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import random
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
@@ -22,6 +23,7 @@ from core.anthropic.native_sse_block_policy import (
     NativeSseBlockPolicyState,
     transform_native_sse_block_event,
 )
+from core.ip_rotation import IpRotationService
 from core.trace import provider_native_messages_body_snapshot, trace_event
 from providers.base import BaseProvider, ProviderConfig
 from providers.error_mapping import (
@@ -37,6 +39,49 @@ from providers.model_listing import (
 from providers.rate_limit import GlobalRateLimiter
 
 StreamChunkMode = Literal["line", "event"]
+
+# ==================== GLOBAL PROXY POOL ====================
+# Credentials for authenticated proxy entries.
+_PROXY_USER = "5eh8cgpws2g1"
+_PROXY_PASS = "9w7i4i81lwfttw9"
+_PROXY_PORT = 3129
+
+# IP prefixes seeded with working blocks.
+_PROXY_IP_PREFIXES: list[str] = [
+    "216.26.235",
+    "216.26.245",
+    "209.50.172",
+    "216.26.231",
+    "45.3.52",
+    "65.111.6",
+    "45.3.55",
+    "104.207.53",
+    "209.50.165",
+    "104.207.47",
+]
+
+# Build the pool: None = direct (default Ethernet IP), then 100 proxy URLs
+# spread evenly across the known IP prefixes.
+GLOBAL_PROXY_POOL: list[str | None] = [None]
+
+_proxies_per_prefix = max(1, 100 // len(_PROXY_IP_PREFIXES))
+for _prefix in _PROXY_IP_PREFIXES:
+    GLOBAL_PROXY_POOL.extend(
+        f"http://{_PROXY_USER}:{_PROXY_PASS}@{_prefix}.{_last_octet}:{_PROXY_PORT}"
+        for _last_octet in range(1, _proxies_per_prefix + 1)
+    )
+
+# Maximum per-request proxy rotation attempts before surfacing an error.
+_MAX_PROXY_RETRIES = 5
+
+# Log proxy pool configuration at module load
+logger.info(
+    "GLOBAL_PROXY: Pool initialized with {} total entries ({} authenticated proxies, {} direct)",
+    len(GLOBAL_PROXY_POOL),
+    len([p for p in GLOBAL_PROXY_POOL if p is not None]),
+    1 if None in GLOBAL_PROXY_POOL else 0,
+)
+# ==================== END GLOBAL PROXY POOL ====================
 
 
 async def _maybe_await_aclose(response: Any) -> None:
@@ -150,14 +195,196 @@ class AnthropicMessagesTransport(BaseProvider):
         )
 
     async def _send_stream_request(self, body: dict) -> httpx.Response:
-        """Create a streaming messages response."""
-        request = self._client.build_request(
-            "POST",
-            "/messages",
-            json=body,
-            headers=self._request_headers(),
+        """Create a streaming messages response with automatic proxy rotation.
+
+        When :class:`IpRotationService` is enabled, VPN proxies are tried first
+        (randomly selected), then direct computer IP as a last resort.
+        Falls back to the legacy ``GLOBAL_PROXY_POOL`` when the service is not
+        configured or unavailable.
+        """
+        last_exc: Exception | None = None
+
+        # Use IpRotationService when available, fall back to legacy pool
+        _rs: IpRotationService | None = IpRotationService.get_instance()
+        use_service = _rs is not None and _rs.is_enabled
+
+        if use_service:
+            assert _rs is not None  # narrow for type checker
+            proxy_order = _rs.get_random_order()
+            max_retries = len(proxy_order)
+        else:
+            max_retries = _MAX_PROXY_RETRIES
+
+        for attempt in range(max_retries):
+            # --- pick a proxy --------------------------------------------------
+            if use_service:
+                assert _rs is not None  # narrow for type checker
+                chosen_proxy = proxy_order[attempt]
+            else:
+                # Legacy GLOBAL_PROXY_POOL behaviour
+                available_pool = [p for p in GLOBAL_PROXY_POOL if p is not None]
+                if not available_pool or attempt == _MAX_PROXY_RETRIES - 1:
+                    available_pool = GLOBAL_PROXY_POOL.copy()
+                if not available_pool:
+                    logger.error(
+                        "GLOBAL_PROXY: All proxies exhausted (including direct IP)"
+                    )
+                    if last_exc:
+                        raise last_exc
+                    raise RuntimeError("All proxy options exhausted")
+                chosen_proxy = random.choice(available_pool)
+
+            proxy_label = (
+                _rs.label_for(chosen_proxy)  # type: ignore[union-attr]
+                if use_service
+                else (
+                    "DIRECT COMPUTER IP (no proxy)"
+                    if chosen_proxy is None
+                    else chosen_proxy
+                )
+            )
+
+            logger.info(
+                "{}_PROXY: {} attempt {}/{} using: {}",
+                "IP_ROTATION" if use_service else "GLOBAL",
+                self._provider_name,
+                attempt + 1,
+                max_retries,
+                proxy_label,
+            )
+
+            # --- create transport & send request ------------------------------
+            transport = (
+                httpx.AsyncHTTPTransport(proxy=chosen_proxy, verify=False)
+                if chosen_proxy is not None
+                else httpx.AsyncHTTPTransport(verify=False)
+            )
+
+            async with httpx.AsyncClient(
+                base_url=self._base_url,
+                transport=transport,
+                timeout=httpx.Timeout(
+                    self._config.http_read_timeout,
+                    connect=self._config.http_connect_timeout,
+                    read=self._config.http_read_timeout,
+                    write=self._config.http_write_timeout,
+                ),
+            ) as client:
+                try:
+                    request = client.build_request(
+                        "POST",
+                        "/messages",
+                        json=body,
+                        headers=self._request_headers(),
+                    )
+                    response = await client.send(request, stream=True)
+
+                    # Check for explicit error status codes
+                    if response.status_code in (429, 407):
+                        logger.warning(
+                            "{}_PROXY: {} {} via {} (attempt {}/{}), rotating proxy",
+                            "IP_ROTATION" if use_service else "GLOBAL",
+                            self._provider_name,
+                            f"{response.status_code} {'rate limit' if response.status_code == 429 else 'auth failure'}",
+                            proxy_label,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        await response.aclose()
+                        last_exc = httpx.HTTPStatusError(
+                            f"{response.status_code} via {proxy_label}",
+                            request=request,
+                            response=response,
+                        )
+                        continue
+
+                    # Detect fake 200 OK responses containing error signatures
+                    if response.status_code == 200:
+                        preview_bytes = b""
+                        try:
+                            async for chunk in response.aiter_bytes(chunk_size=1024):
+                                preview_bytes = chunk
+                                break
+                        except Exception:
+                            pass
+
+                        if preview_bytes:
+                            preview_text = preview_bytes.decode(
+                                "utf-8", errors="replace"
+                            ).lower()
+                            error_signatures = [
+                                "limit reached",
+                                "provider failed",
+                                "error",
+                                "failed to respond",
+                            ]
+
+                            if any(sig in preview_text for sig in error_signatures):
+                                logger.warning(
+                                    "{}_PROXY: {} fake 200 OK with error payload via {} (attempt {}/{}), rotating proxy",
+                                    "IP_ROTATION" if use_service else "GLOBAL",
+                                    self._provider_name,
+                                    proxy_label,
+                                    attempt + 1,
+                                    max_retries,
+                                )
+                                await response.aclose()
+                                last_exc = httpx.HTTPStatusError(
+                                    f"fake 200 OK error payload via {proxy_label}",
+                                    request=request,
+                                    response=response,
+                                )
+                                continue
+
+                    # Success - detach transport and return response
+                    client._transport = httpx.AsyncHTTPTransport()
+                    logger.info(
+                        "{}_PROXY: {} request OK via {}",
+                        "IP_ROTATION" if use_service else "GLOBAL",
+                        self._provider_name,
+                        proxy_label,
+                    )
+                    return response
+
+                except (
+                    httpx.ProxyError,
+                    httpx.ConnectTimeout,
+                    httpx.ReadTimeout,
+                ) as exc:
+                    logger.warning(
+                        "{}_PROXY: {} {} via {} (attempt {}/{}), rotating proxy",
+                        "IP_ROTATION" if use_service else "GLOBAL",
+                        self._provider_name,
+                        type(exc).__name__,
+                        proxy_label,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    last_exc = exc
+                    continue
+
+                except Exception as exc:
+                    logger.warning(
+                        "{}_PROXY: {} unexpected {} via {} (attempt {}/{}), rotating proxy",
+                        "IP_ROTATION" if use_service else "GLOBAL",
+                        self._provider_name,
+                        type(exc).__name__,
+                        proxy_label,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    last_exc = exc
+                    continue
+
+        logger.error(
+            "{}_PROXY: {} all {} attempts exhausted; last error: {}",
+            "IP_ROTATION" if use_service else "GLOBAL",
+            self._provider_name,
+            max_retries,
+            last_exc,
         )
-        return await self._client.send(request, stream=True)
+        assert last_exc is not None
+        raise last_exc
 
     async def _raise_for_status(
         self, response: httpx.Response, *, req_tag: str

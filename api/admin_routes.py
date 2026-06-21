@@ -326,7 +326,7 @@ async def get_provider_model_tokens(provider_id: str):
     models = tracker.get_provider_models(provider_id)
     if models is None:
         raise HTTPException(status_code=404, detail=f"Provider {provider_id} not found")
-    
+
     return {
         "provider_id": provider_id,
         "models": {model_id: stats.to_dict() for model_id, stats in models.items()},
@@ -338,7 +338,7 @@ async def get_tokens_hierarchy():
     """Get complete hierarchical view: All Providers -> Models -> Stats."""
     tracker = get_token_tracker()
     all_providers = tracker.get_all_providers()
-    
+
     hierarchy = {}
     for provider_id, models in all_providers.items():
         # Calculate provider total
@@ -346,7 +346,7 @@ async def get_tokens_hierarchy():
         provider_output = sum(m.output_tokens for m in models.values())
         provider_total = provider_input + provider_output
         provider_requests = sum(m.request_count for m in models.values())
-        
+
         hierarchy[provider_id] = {
             "total": {
                 "input_tokens": provider_input,
@@ -354,11 +354,9 @@ async def get_tokens_hierarchy():
                 "total_tokens": provider_total,
                 "request_count": provider_requests,
             },
-            "models": {
-                model_id: stats.to_dict() for model_id, stats in models.items()
-            },
+            "models": {model_id: stats.to_dict() for model_id, stats in models.items()},
         }
-    
+
     return {
         "global_total": tracker.get_total_tokens().to_dict(),
         "by_provider": hierarchy,
@@ -374,7 +372,7 @@ async def get_model_across_providers(model_name: str):
         raise HTTPException(
             status_code=404, detail=f"Model {model_name} not found in any provider"
         )
-    
+
     return {
         "model_name": model_name,
         "providers": {key: stats.to_dict() for key, stats in usage.items()},
@@ -403,52 +401,54 @@ async def reset_token_tracker():
 @router.get("/admin/api/tokens/storage")
 async def get_token_storage_info():
     """Get information about persistent token storage (database)."""
-    from pathlib import Path
     import os
-    
+
     tracker = get_token_tracker()
     db_path = tracker._db_path
-    
+
     info = {
         "database_location": str(db_path),
         "database_exists": db_path.exists(),
     }
-    
+
     if db_path.exists():
         # Get file size
         size_bytes = os.path.getsize(db_path)
-        
+
         # Get record count
         try:
             import sqlite3
+
             with sqlite3.connect(db_path) as conn:
                 cursor = conn.execute("SELECT COUNT(*) FROM token_usage")
                 record_count = cursor.fetchone()[0]
-                
+
                 cursor = conn.execute(
                     "SELECT MIN(recorded_at), MAX(recorded_at) FROM token_usage"
                 )
                 min_date, max_date = cursor.fetchone()
-                
-                info.update({
-                    "size_bytes": size_bytes,
-                    "size_mb": round(size_bytes / (1024 * 1024), 2),
-                    "record_count": record_count,
-                    "earliest_record": min_date,
-                    "latest_record": max_date,
-                    "data_retention": "indefinite (no auto-delete)",
-                    "persistence": "enabled",
-                })
+
+                info.update(
+                    {
+                        "size_bytes": size_bytes,
+                        "size_mb": round(size_bytes / (1024 * 1024), 2),
+                        "record_count": record_count,
+                        "earliest_record": min_date,
+                        "latest_record": max_date,
+                        "data_retention": "indefinite (no auto-delete)",
+                        "persistence": "enabled",
+                    }
+                )
         except Exception as e:
             info["error"] = str(e)
-    
+
     return info
 
 
 @router.post("/admin/api/tokens/backup")
 async def backup_token_data():
     """Export all token data to JSON format for backup.
-    
+
     Use this when switching devices - export, transfer file, then imports on new device.
     """
     tracker = get_token_tracker()
@@ -462,7 +462,7 @@ async def backup_token_data():
 @router.post("/admin/api/tokens/restore")
 async def restore_token_data(backup_data: dict):
     """Restore token data from a backup JSON.
-    
+
     Request body should be the data from /backup endpoint.
     ⚠️ This will merge with existing data - use /reset first if you want to replace.
     """
@@ -484,17 +484,21 @@ async def restore_token_data(backup_data: dict):
 @router.post("/admin/api/tokens/backup/file")
 async def backup_to_file():
     """Generate a downloadable backup file (JSON).
-    
+
     This endpoint returns the backup data - save with .json extension.
     """
     from pathlib import Path
+
     tracker = get_token_tracker()
-    
+
     try:
         # Create backup in /tmp
-        backup_path = Path("/tmp") / f"token_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        backup_path = (
+            Path("/tmp")
+            / f"token_backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+        )
         tracker.backup_to_file(str(backup_path))
-        
+
         # Return the data (client can download or save)
         return {
             "status": "success",
@@ -508,5 +512,3 @@ async def backup_to_file():
             "status": "error",
             "message": str(e),
         }
-
-

@@ -7,9 +7,8 @@ Watches .env file for changes and reloads settings after active requests complet
 import asyncio
 import os
 import threading
-import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 

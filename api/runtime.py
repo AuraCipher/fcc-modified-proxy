@@ -13,7 +13,9 @@ from loguru import logger
 
 from api.admin_urls import local_admin_url
 from config.hot_reload import start_reload_watcher, stop_reload_watcher
+from config.ip_rotation import IpRotationSettings
 from config.settings import Settings, _reload_cached_settings, get_settings
+from core.ip_rotation import IpRotationService
 from core.token_tracking import TokenTracker
 from providers.exceptions import ServiceUnavailableError
 from providers.registry import ProviderRegistry
@@ -108,10 +110,18 @@ class AppRuntime:
         self._provider_registry = ProviderRegistry()
         self.app.state.provider_registry = self._provider_registry
         try:
+            # Initialize IP rotation service (VPN proxy pool)
+            IpRotationService.init_instance(
+                IpRotationSettings(
+                    proxies=self.settings.ip_rotation_proxies,
+                    max_attempts=self.settings.ip_rotation_max_attempts,
+                    fallback_to_direct=self.settings.ip_rotation_fallback_to_direct,
+                )
+            )
             # Start hot-reload watcher for .env changes
             start_reload_watcher(_reload_cached_settings)
             # Initialize token tracker (loads persisted data from DB)
-            token_tracker = TokenTracker.get_instance()
+            TokenTracker.get_instance()
             warn_if_process_auth_token(self.settings)
             await self._validate_configured_models_best_effort()
             self._provider_registry.start_model_list_refresh(self.settings)

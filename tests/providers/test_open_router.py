@@ -4,6 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from core.anthropic.stream_contracts import (
@@ -12,6 +13,7 @@ from core.anthropic.stream_contracts import (
     text_content,
     thinking_content,
 )
+from providers.anthropic_messages import _MAX_PROXY_RETRIES, GLOBAL_PROXY_POOL
 from providers.base import ProviderConfig
 from providers.open_router import OpenRouterProvider
 from providers.open_router.request import OPENROUTER_DEFAULT_MAX_TOKENS
@@ -48,26 +50,57 @@ class FakeResponse:
         self._lines = lines or []
         self._text = text
         self.is_closed = False
+        # Provide a real httpx.Request so raise_for_status works
+        self.request = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
 
     async def aiter_lines(self):
         for line in self._lines:
             yield line
 
+    async def aiter_bytes(self, chunk_size=65536):
+        """Yield response body in chunks (for body inspection)."""
+        if self._text:
+            yield self._text.encode()
+
     async def aread(self):
         return self._text.encode()
 
     def raise_for_status(self):
-        import httpx
-
         response = httpx.Response(
             self.status_code,
-            request=httpx.Request("POST", "https://openrouter.ai/api/v1/messages"),
+            request=self.request,
             text=self._text,
         )
         response.raise_for_status()
 
     async def aclose(self):
         self.is_closed = True
+
+
+def _make_async_client_mock(response: FakeResponse) -> tuple[MagicMock, MagicMock]:
+    """Return ``(client_class_mock, client_instance_mock)``.
+
+    ``client_class_mock`` patches ``httpx.AsyncClient`` so that any
+    ``async with httpx.AsyncClient(...) as client:`` block yields
+    ``client_instance_mock``.  Tests can inspect ``client_instance_mock``
+    to verify headers and other call details.
+    """
+    fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+    client_mock = MagicMock()
+    client_mock.build_request.return_value = fake_req
+    client_mock.send = AsyncMock(return_value=response)
+    client_mock._transport = MagicMock()
+
+    async def _aenter(_):
+        return client_mock
+
+    async def _aexit(_, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter
+    client_class_mock.return_value.__aexit__ = _aexit
+    return client_class_mock, client_mock
 
 
 @pytest.fixture
@@ -314,18 +347,12 @@ async def test_stream_response_passes_native_sse_events(open_router_provider):
         ]
     )
 
-    with (
-        patch.object(open_router_provider._client, "build_request") as mock_build,
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, client_mock = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in open_router_provider.stream_response(req)]
 
-    _, kwargs = mock_build.call_args
+    # Verify auth headers were passed via build_request kwargs
+    _, kwargs = client_mock.build_request.call_args
     assert kwargs["headers"]["Authorization"] == "Bearer test_openrouter_key"
     assert kwargs["headers"]["anthropic-version"] == "2023-06-01"
     assert events[0].startswith("event: message_start")
@@ -365,15 +392,8 @@ async def test_stream_response_suppresses_native_thinking_when_disabled(
         ]
     )
 
-    with (
-        patch.object(provider._client, "build_request"),
-        patch.object(
-            provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in provider.stream_response(MockRequest())]
 
     event_text = "".join(events)
@@ -413,15 +433,8 @@ async def test_stream_response_preserves_redacted_thinking_when_enabled(
         ]
     )
 
-    with (
-        patch.object(open_router_provider._client, "build_request"),
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in open_router_provider.stream_response(MockRequest())]
 
     event_text = "".join(events)
@@ -466,15 +479,8 @@ async def test_stream_response_drops_redacted_thinking_when_disabled(
         ]
     )
 
-    with (
-        patch.object(provider._client, "build_request"),
-        patch.object(
-            provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in provider.stream_response(MockRequest())]
 
     event_text = "".join(events)
@@ -530,15 +536,8 @@ async def test_stream_response_reopens_interleaved_thinking_after_text(
         ]
     )
 
-    with (
-        patch.object(open_router_provider._client, "build_request"),
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in open_router_provider.stream_response(MockRequest())]
 
     parsed = parse_sse_text("".join(events))
@@ -609,15 +608,8 @@ async def test_stream_response_reopened_tool_use_preserves_tool_identity(
 
     response = FakeResponse(lines=lines)
 
-    with (
-        patch.object(open_router_provider._client, "build_request"),
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in open_router_provider.stream_response(MockRequest())]
 
     parsed = parse_sse_text("".join(events))
@@ -661,15 +653,8 @@ async def test_stream_response_closes_overlapping_thinking_before_text(
         ]
     )
 
-    with (
-        patch.object(open_router_provider._client, "build_request"),
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            return_value=response,
-        ),
-    ):
+    client_class_mock, _ = _make_async_client_mock(response)
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
         events = [e async for e in open_router_provider.stream_response(MockRequest())]
 
     event_text = "".join(events)
@@ -684,14 +669,12 @@ async def test_stream_response_closes_overlapping_thinking_before_text(
 async def test_stream_response_error_path(open_router_provider):
     req = MockRequest()
 
-    with (
-        patch.object(open_router_provider._client, "build_request"),
-        patch.object(
-            open_router_provider._client,
-            "send",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("API failed"),
-        ),
+    # Patch _send_stream_request directly to simulate exhausted retries (all proxies failed)
+    with patch.object(
+        open_router_provider,
+        "_send_stream_request",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("API failed"),
     ):
         events = [e async for e in open_router_provider.stream_response(req)]
 
@@ -699,3 +682,370 @@ async def test_stream_response_error_path(open_router_provider):
     assert "message_start" in event_text
     assert "API failed" in event_text
     assert "message_stop" in event_text
+
+
+# ---------------------------------------------------------------------------
+# Proxy pool & rotation tests
+# ---------------------------------------------------------------------------
+
+
+def test_proxy_pool_starts_with_none():
+    """First entry must be None (direct / Ethernet IP path)."""
+    assert GLOBAL_PROXY_POOL[0] is None
+
+
+def test_proxy_pool_contains_roughly_100_proxies():
+    """Pool must have 100+ authenticated proxy entries (plus the None sentinel)."""
+    authenticated = [p for p in GLOBAL_PROXY_POOL if p is not None]
+    assert len(authenticated) >= 100
+
+
+def test_proxy_pool_entries_contain_credentials():
+    """Every authenticated proxy must embed the proxy credentials."""
+    for entry in GLOBAL_PROXY_POOL:
+        if entry is None:
+            continue
+        assert "5eh8cgpws2g1" in entry
+        assert "9w7i4i81lwfttw9" in entry
+        assert ":3129" in entry
+
+
+def test_proxy_pool_covers_all_ip_prefixes():
+    """Each seeded IP prefix must appear in at least one pool entry."""
+    prefixes = [
+        "216.26.235",
+        "216.26.245",
+        "209.50.172",
+        "216.26.231",
+        "45.3.52",
+        "65.111.6",
+        "45.3.55",
+        "104.207.53",
+        "209.50.165",
+        "104.207.47",
+    ]
+    for prefix in prefixes:
+        assert any(p is not None and prefix in p for p in GLOBAL_PROXY_POOL), (
+            f"prefix {prefix} missing from GLOBAL_PROXY_POOL"
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_rotates_proxy_on_407(open_router_provider):
+    """407 responses should trigger proxy rotation and retry."""
+    ok_response = FakeResponse(
+        lines=[
+            "event: message_start",
+            'data: {"type":"message_start","message":{}}',
+            "",
+        ]
+    )
+    bad_response = FakeResponse(status_code=407)
+
+    call_count = 0
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        # First call returns 407, second returns 200
+        if call_count == 1:
+            client_mock.send = AsyncMock(return_value=bad_response)
+        else:
+            client_mock.send = AsyncMock(return_value=ok_response)
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with patch("providers.anthropic_messages.httpx.AsyncClient", client_class_mock):
+        result = await open_router_provider._send_stream_request(body)
+
+    assert call_count == 2
+    assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_rotates_proxy_on_429(open_router_provider):
+    """429 rate-limit responses must also trigger rotation."""
+    ok_response = FakeResponse(status_code=200, lines=[])
+    rate_response = FakeResponse(status_code=429)
+
+    call_count = 0
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        client_mock.send = AsyncMock(
+            return_value=rate_response if call_count == 1 else ok_response
+        )
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with patch("providers.anthropic_messages.httpx.AsyncClient", client_class_mock):
+        result = await open_router_provider._send_stream_request(body)
+
+    assert call_count == 2
+    assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_raises_after_all_retries_exhausted(
+    open_router_provider,
+):
+    """When every attempt fails the last exception must propagate."""
+    import httpx as _httpx
+
+    call_count = 0
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = _httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        client_mock.send = AsyncMock(
+            side_effect=_httpx.ProxyError("proxy dead", request=fake_req)
+        )
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with (
+        patch("providers.open_router.client.httpx.AsyncClient", client_class_mock),
+        pytest.raises(_httpx.ProxyError),
+    ):
+        await open_router_provider._send_stream_request(body)
+
+    assert call_count == _MAX_PROXY_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_detects_fake_200_with_error_payload(
+    open_router_provider,
+):
+    """Fake 200 OK responses with error signatures should trigger rotation."""
+
+    class FakeErrorResponse(FakeResponse):
+        async def aiter_bytes(self, chunk_size=65536):
+            """Simulate streaming response with error signature."""
+            yield b'{"error": "limit reached", "message": "Provider failed to respond"}'
+
+    ok_response = FakeResponse(status_code=200, lines=[])
+    fake_error_response = FakeErrorResponse(status_code=200)
+
+    call_count = 0
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        # First call returns fake 200 with error, second returns real 200
+        if call_count == 1:
+            client_mock.send = AsyncMock(return_value=fake_error_response)
+        else:
+            client_mock.send = AsyncMock(return_value=ok_response)
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
+        result = await open_router_provider._send_stream_request(body)
+
+    assert call_count == 2
+    assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_accepts_real_200_without_errors(
+    open_router_provider,
+):
+    """Real 200 OK responses without error signatures should be accepted immediately."""
+
+    class CleanResponse(FakeResponse):
+        async def aiter_bytes(self, chunk_size=65536):
+            """Simulate streaming response without error signatures."""
+            yield b'{"type": "message_start", "message": {}}'
+
+    clean_response = CleanResponse(status_code=200)
+
+    call_count = 0
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        client_mock.send = AsyncMock(return_value=clean_response)
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with patch("providers.open_router.client.httpx.AsyncClient", client_class_mock):
+        result = await open_router_provider._send_stream_request(body)
+
+    # Should succeed on first attempt
+    assert call_count == 1
+    assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_uses_direct_ip_on_last_resort(
+    open_router_provider,
+):
+    """Direct IP (None) should only be used on the 5th/final attempt."""
+    from providers.anthropic_messages import _MAX_PROXY_RETRIES, GLOBAL_PROXY_POOL
+
+    # Ensure None is in the pool
+    if None not in GLOBAL_PROXY_POOL:
+        GLOBAL_PROXY_POOL.insert(0, None)
+
+    fake_error_response = FakeResponse(status_code=429)  # Simple 429 error
+    ok_response = FakeResponse(status_code=200, lines=[])
+
+    call_count = 0
+    selected_proxies = []
+
+    async def _aenter_side_effect(_self):
+        nonlocal call_count
+        call_count += 1
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+
+        # Fail attempts 1-4, succeed on attempt 5
+        if call_count < _MAX_PROXY_RETRIES:
+            client_mock.send = AsyncMock(return_value=fake_error_response)
+        else:
+            client_mock.send = AsyncMock(return_value=ok_response)
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    # Capture selected proxies
+    original_choice = __import__("random").choice
+
+    def _patched_choice(seq):
+        result = original_choice(seq)
+        selected_proxies.append(result)
+        return result
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with (
+        patch("providers.open_router.client.httpx.AsyncClient", client_class_mock),
+        patch(
+            "providers.open_router.client.random.choice", side_effect=_patched_choice
+        ),
+    ):
+        result = await open_router_provider._send_stream_request(body)
+
+    # Verify first 4 attempts used authenticated proxies only
+    for i in range(4):
+        assert selected_proxies[i] is not None, (
+            f"Attempt {i + 1} should use authenticated proxy"
+        )
+
+    # 5th/final attempt should succeed (could be None or authenticated proxy)
+    assert len(selected_proxies) == 5
+    assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_stream_request_uses_authenticated_proxies_first(
+    open_router_provider,
+):
+    """Authenticated proxies should be used before direct IP."""
+    from providers.anthropic_messages import GLOBAL_PROXY_POOL
+
+    # Ensure None is in the pool
+    if None not in GLOBAL_PROXY_POOL:
+        GLOBAL_PROXY_POOL.insert(0, None)
+
+    ok_response = FakeResponse(status_code=200, lines=[])
+    selected_proxies = []
+
+    async def _aenter_side_effect(_self):
+        client_mock = MagicMock()
+        fake_req = httpx.Request("POST", "https://openrouter.ai/api/v1/messages")
+        client_mock.build_request.return_value = fake_req
+        client_mock.send = AsyncMock(return_value=ok_response)
+        client_mock._transport = MagicMock()
+        return client_mock
+
+    async def _aexit(_self, *exc):
+        pass
+
+    client_class_mock = MagicMock()
+    client_class_mock.return_value.__aenter__ = _aenter_side_effect
+    client_class_mock.return_value.__aexit__ = _aexit
+
+    # Capture which proxies are selected
+    original_choice = __import__("random").choice
+
+    def _patched_choice(seq):
+        result = original_choice(seq)
+        selected_proxies.append(result)
+        return result
+
+    body = open_router_provider._build_request_body(MockRequest())
+    with (
+        patch("providers.open_router.client.httpx.AsyncClient", client_class_mock),
+        patch(
+            "providers.open_router.client.random.choice", side_effect=_patched_choice
+        ),
+    ):
+        result = await open_router_provider._send_stream_request(body)
+
+    # First attempt should use authenticated proxy (not None)
+    assert len(selected_proxies) == 1
+    assert selected_proxies[0] is not None
+    assert result.status_code == 200

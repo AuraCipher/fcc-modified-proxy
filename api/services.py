@@ -92,23 +92,26 @@ async def _stream_and_track_tokens(
 ) -> AsyncIterator[str]:
     """Pass through SSE stream and track token usage on completion."""
     import json
+
     tracker = get_token_tracker()
     output_tokens = 0
-    
+
     async for chunk in streamed:
         # Extract output_tokens from message_delta events
         if '"message_delta"' in chunk and '"output_tokens"' in chunk:
             try:
-                lines = chunk.split('\n')
+                lines = chunk.split("\n")
                 for line in lines:
-                    if line.startswith('data: '):
+                    if line.startswith("data: "):
                         data = json.loads(line[6:])
-                        if data.get('type') == 'message_delta':
-                            output_tokens = data.get('usage', {}).get('output_tokens', 0)
+                        if data.get("type") == "message_delta":
+                            output_tokens = data.get("usage", {}).get(
+                                "output_tokens", 0
+                            )
             except Exception:
                 pass
         yield chunk
-    
+
     # Track output tokens after stream completes
     if output_tokens > 0:
         tracker.add_tokens(provider_id, model_id, 0, output_tokens)
@@ -244,7 +247,7 @@ class ClaudeProxyService:
                         "gateway_model": routed.request.model,
                     },
                 )
-                
+
                 # Wrap stream to track output tokens
                 tracked_stream = _stream_and_track_tokens(
                     streamed,

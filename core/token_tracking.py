@@ -45,9 +45,7 @@ class TokenStats:
             "total_tokens": self.total_tokens,
             "request_count": self.request_count,
             "avg_tokens_per_request": (
-                self.total_tokens // self.request_count
-                if self.request_count > 0
-                else 0
+                self.total_tokens // self.request_count if self.request_count > 0 else 0
             ),
             "last_updated": self.last_updated.isoformat(),
         }
@@ -56,7 +54,7 @@ class TokenStats:
 def _get_db_path() -> Path:
     """Get the path to the token tracking database."""
     from config.paths import managed_env_path
-    
+
     # Store in same location as managed env (typically project root)
     base_path = managed_env_path().parent
     db_path = base_path / "token_tracking.db"
@@ -66,7 +64,7 @@ def _get_db_path() -> Path:
 class TokenTracker:
     """Centralized token usage tracker with provider/model hierarchy and persistence."""
 
-    _instance: ClassVar["TokenTracker | None"] = None
+    _instance: ClassVar[TokenTracker | None] = None
     _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self):
@@ -83,7 +81,7 @@ class TokenTracker:
         self._time_windows: dict[str, TokenStats] = defaultdict(TokenStats)
         # Database path
         self._db_path = _get_db_path()
-        
+
         # Initialize database
         self._init_db()
         # Load existing data from database
@@ -106,11 +104,11 @@ class TokenTracker:
                     )
                 """)
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_provider_model 
+                    CREATE INDEX IF NOT EXISTS idx_provider_model
                     ON token_usage(provider_id, model_id)
                 """)
                 conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_recorded_at 
+                    CREATE INDEX IF NOT EXISTS idx_recorded_at
                     ON token_usage(recorded_at)
                 """)
                 conn.commit()
@@ -123,14 +121,20 @@ class TokenTracker:
         try:
             with sqlite3.connect(self._db_path) as conn:
                 cursor = conn.execute("""
-                    SELECT provider_id, model_id, 
-                           SUM(input_tokens), SUM(output_tokens), 
+                    SELECT provider_id, model_id,
+                           SUM(input_tokens), SUM(output_tokens),
                            SUM(request_count)
                     FROM token_usage
                     GROUP BY provider_id, model_id
                 """)
-                
-                for provider_id, model_id, input_tokens, output_tokens, request_count in cursor:
+
+                for (
+                    provider_id,
+                    model_id,
+                    input_tokens,
+                    output_tokens,
+                    request_count,
+                ) in cursor:
                     if input_tokens is None:
                         continue
                     self._tokens_by_provider[provider_id][model_id].add(
@@ -143,14 +147,13 @@ class TokenTracker:
                         output_tokens or 0,
                         request_count or 0,
                     )
-            
+
             logger.info("Token tracking data loaded from persistent storage")
         except Exception as e:
             logger.error(f"Failed to load token tracking data from database: {e}")
 
     def _save_to_db(
-        self, provider_id: str, model_id: str, 
-        input_tokens: int, output_tokens: int
+        self, provider_id: str, model_id: str, input_tokens: int, output_tokens: int
     ) -> None:
         """Save token usage to database (asynchronous to avoid blocking)."""
         try:
@@ -158,24 +161,34 @@ class TokenTracker:
                 # Record at hourly granularity to avoid too many entries
                 now = datetime.utcnow()
                 hour_bucket = now.replace(minute=0, second=0, microsecond=0)
-                
-                conn.execute("""
-                    INSERT INTO token_usage 
+
+                conn.execute(
+                    """
+                    INSERT INTO token_usage
                     (provider_id, model_id, input_tokens, output_tokens, request_count, recorded_at)
                     VALUES (?, ?, ?, ?, 1, ?)
-                    ON CONFLICT(provider_id, model_id, recorded_at) 
+                    ON CONFLICT(provider_id, model_id, recorded_at)
                     DO UPDATE SET
                         input_tokens = input_tokens + ?,
                         output_tokens = output_tokens + ?,
                         request_count = request_count + 1
-                """, (provider_id, model_id, input_tokens, output_tokens, hour_bucket,
-                      input_tokens, output_tokens))
+                """,
+                    (
+                        provider_id,
+                        model_id,
+                        input_tokens,
+                        output_tokens,
+                        hour_bucket,
+                        input_tokens,
+                        output_tokens,
+                    ),
+                )
                 conn.commit()
         except Exception as e:
             logger.debug(f"Failed to save to database: {e}")
 
     @classmethod
-    def get_instance(cls) -> "TokenTracker":
+    def get_instance(cls) -> TokenTracker:
         """Get singleton instance."""
         if cls._instance is None:
             with cls._lock:
@@ -250,18 +263,26 @@ class TokenTracker:
             # From database
             try:
                 with sqlite3.connect(self._db_path) as conn:
-                    cursor = conn.execute("""
-                        SELECT recorded_at, 
-                               SUM(input_tokens), SUM(output_tokens), 
+                    cursor = conn.execute(
+                        """
+                        SELECT recorded_at,
+                               SUM(input_tokens), SUM(output_tokens),
                                SUM(request_count)
                         FROM token_usage
                         WHERE recorded_at >= ?
                         GROUP BY recorded_at
                         ORDER BY recorded_at DESC
-                    """, (cutoff,))
+                    """,
+                        (cutoff,),
+                    )
 
                     history = {}
-                    for recorded_at, input_tokens, output_tokens, request_count in cursor:
+                    for (
+                        recorded_at,
+                        input_tokens,
+                        output_tokens,
+                        request_count,
+                    ) in cursor:
                         stats = TokenStats()
                         stats.input_tokens = input_tokens or 0
                         stats.output_tokens = output_tokens or 0
@@ -286,10 +307,13 @@ class TokenTracker:
         try:
             cutoff = datetime.utcnow() - timedelta(days=days)
             with sqlite3.connect(self._db_path) as conn:
-                cursor = conn.execute("""
+                cursor = conn.execute(
+                    """
                     DELETE FROM token_usage
                     WHERE recorded_at < ?
-                """, (cutoff,))
+                """,
+                    (cutoff,),
+                )
                 conn.commit()
                 deleted = cursor.rowcount
                 if deleted > 0:
@@ -301,7 +325,7 @@ class TokenTracker:
 
     def export_to_json(self) -> dict:
         """Export all token data to JSON-serializable format.
-        
+
         Returns:
             Dict with all token data, ready for JSON serialization
         """
@@ -311,7 +335,7 @@ class TokenTracker:
                 "by_provider": {
                     provider: {
                         "by_model": {
-                            model_id: stats.to_dict() 
+                            model_id: stats.to_dict()
                             for model_id, stats in models.items()
                         }
                     }
@@ -322,7 +346,7 @@ class TokenTracker:
 
     def import_from_json(self, data: dict) -> None:
         """Import token data from JSON format.
-        
+
         Args:
             data: Dict with token data (from export_to_json)
         """
@@ -330,7 +354,9 @@ class TokenTracker:
             with self._data_lock:
                 # Load into memory structures
                 for provider_id, provider_data in data.get("by_provider", {}).items():
-                    for model_id, model_stats_dict in provider_data.get("by_model", {}).items():
+                    for model_id, model_stats_dict in provider_data.get(
+                        "by_model", {}
+                    ).items():
                         stats = TokenStats(
                             input_tokens=model_stats_dict.get("input_tokens", 0),
                             output_tokens=model_stats_dict.get("output_tokens", 0),
@@ -338,7 +364,7 @@ class TokenTracker:
                             request_count=model_stats_dict.get("request_count", 0),
                         )
                         self._tokens_by_provider[provider_id][model_id] = stats
-                
+
                 # Update global total
                 global_data = data.get("global_total", {})
                 self._total_tokens = TokenStats(
@@ -347,7 +373,7 @@ class TokenTracker:
                     total_tokens=global_data.get("total_tokens", 0),
                     request_count=global_data.get("request_count", 0),
                 )
-                
+
                 logger.info("Token data imported successfully")
         except Exception as e:
             logger.error(f"Failed to import token data: {e}")
@@ -355,14 +381,15 @@ class TokenTracker:
 
     def backup_to_file(self, filepath: str) -> None:
         """Backup token data to a JSON file.
-        
+
         Args:
             filepath: Path where to save the backup file
         """
         import json
+
         try:
             export_data = self.export_to_json()
-            with open(filepath, 'w') as f:
+            with open(filepath, "w") as f:
                 json.dump(export_data, f, indent=2)
             logger.info(f"Token data backed up to {filepath}")
         except Exception as e:
@@ -371,20 +398,20 @@ class TokenTracker:
 
     def restore_from_file(self, filepath: str) -> None:
         """Restore token data from a JSON backup file.
-        
+
         Args:
             filepath: Path to the backup file to restore
         """
         import json
+
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath) as f:
                 data = json.load(f)
             self.import_from_json(data)
             logger.info(f"Token data restored from {filepath}")
         except Exception as e:
             logger.error(f"Failed to restore token data from file: {e}")
             raise
-
 
     def get_total_tokens(self) -> TokenStats:
         """Get global token statistics."""
@@ -485,9 +512,7 @@ class TokenTracker:
                         result[full_key] = stats
             return result
 
-    def get_time_window_stats(
-        self, hours_back: int = 24
-    ) -> dict[str, dict]:
+    def get_time_window_stats(self, hours_back: int = 24) -> dict[str, dict]:
         """Get token usage by hour for the last N hours.
 
         Returns dict with hourly breakdown for trending analysis.

@@ -4,14 +4,12 @@ Note: This test is intended to be run standalone, not as part of the pytest
 smoke test suite. Use: uv run python -c "from smoke.hot_reload_test import run_tests; run_tests()"
 """
 
-import asyncio
-import os
 import tempfile
 import time
 from pathlib import Path
 
 from config.hot_reload import SettingsReloadManager
-from config.settings import _reload_cached_settings, get_settings
+from config.settings import get_settings
 
 
 def test_reload_manager_tracks_requests() -> None:
@@ -30,10 +28,14 @@ def test_reload_manager_tracks_requests() -> None:
 
     # Complete requests
     manager.register_request_end()
-    assert manager._active_requests == 1, "Should have 1 active request after one completes"
+    assert manager._active_requests == 1, (
+        "Should have 1 active request after one completes"
+    )
 
     manager.register_request_end()
-    assert manager._active_requests == 0, "Should have 0 active requests after all complete"
+    assert manager._active_requests == 0, (
+        "Should have 0 active requests after all complete"
+    )
     print("✓ Request tracking test passed")
 
 
@@ -75,7 +77,9 @@ def test_reload_executes_immediately_when_no_requests() -> None:
     manager._pending_reload = True
     manager._try_reload()
 
-    assert len(callback_called) == 1, "Callback should be called immediately when no active requests"
+    assert len(callback_called) == 1, (
+        "Callback should be called immediately when no active requests"
+    )
     assert manager._pending_reload is False, "Reload should no longer be pending"
     print("✓ Immediate reload test passed")
 
@@ -132,7 +136,7 @@ def run_tests() -> None:
     try:
         test_reload_manager_tracks_requests()
         print("Completed request tracking test")
-        
+
         test_cache_clear_compatibility()
         print("Completed cache clear test")
 
@@ -160,4 +164,3 @@ def run_tests() -> None:
 
 if __name__ == "__main__":
     run_tests()
-

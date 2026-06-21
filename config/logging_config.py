@@ -44,9 +44,13 @@ _AUTH_BEARER_RE = re.compile(
 
 
 def _nim_console_log_filter(record: Any) -> bool:
-    """Mirror NIM pool status lines to the terminal without TRACE noise."""
+    """Mirror NIM pool status lines and IP rotation logs to the terminal."""
     if record["extra"].get(_TRACE_PAYLOAD_BINDING) is not None:
         return False
+    # Show all IP_ROTATION-prefixed logs on the terminal regardless of module
+    message = str(record.get("message", ""))
+    if message.startswith("IP_ROTATION:"):
+        return True
     return str(record["name"]).startswith("providers.nvidia_nim")
 
 

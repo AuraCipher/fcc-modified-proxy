@@ -11,6 +11,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .constants import HTTP_CONNECT_TIMEOUT_DEFAULT
+from .ip_rotation import resolve_ip_rotation_proxies
 from .nim import NimSettings
 from .paths import default_claude_workspace_path, managed_env_path
 from .provider_ids import SUPPORTED_PROVIDER_IDS
@@ -253,6 +254,18 @@ class Settings(BaseSettings):
     http_connect_timeout: float = Field(
         default=HTTP_CONNECT_TIMEOUT_DEFAULT,
         validation_alias="HTTP_CONNECT_TIMEOUT",
+    )
+
+    # ==================== IP Rotation (VPN proxy pool) ====================
+    # Auto-populated at startup from ~/.fcc/ip_rotation.json or IP_ROTATION_PROXIES env.
+    ip_rotation_proxies: list[str] = Field(
+        default_factory=list, validation_alias="IP_ROTATION_PROXIES"
+    )
+    ip_rotation_max_attempts: int = Field(
+        default=0, ge=0, validation_alias="IP_ROTATION_MAX_ATTEMPTS"
+    )
+    ip_rotation_fallback_to_direct: bool = Field(
+        default=True, validation_alias="IP_ROTATION_FALLBACK_TO_DIRECT"
     )
 
     # ==================== Fast Prefix Detection ====================
@@ -504,6 +517,15 @@ class Settings(BaseSettings):
         else:
             primary = self.nvidia_nim_api_key.strip()
             self.nvidia_nim_api_keys = (primary,) if primary else ()
+        return self
+
+    @model_validator(mode="after")
+    def resolve_ip_rotation_proxies_from_config(self) -> Settings:
+        """Populate ip_rotation_proxies from JSON config file if not set by env."""
+        if not self.ip_rotation_proxies:
+            resolved = resolve_ip_rotation_proxies()
+            if resolved:
+                self.ip_rotation_proxies = resolved
         return self
 
     @model_validator(mode="after")
