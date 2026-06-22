@@ -193,14 +193,15 @@ class OpenAIChatTransport(BaseProvider):
         proxy_label = proxy_url.split("@", 1)[1] if "@" in proxy_url else proxy_url
         start = time.monotonic()
 
-        # Build a proxied client with shorter connect timeout
+        # Build a proxied client with shorter connect and read timeouts
         proxy_connect_timeout = getattr(pool._settings, "proxy_connect_timeout", 5.0)
+        proxy_read_timeout = getattr(pool._settings, "proxy_read_timeout", 20.0)
         http_client = httpx.AsyncClient(
             proxy=proxy_url,
             timeout=httpx.Timeout(
-                self._config.http_read_timeout,
+                proxy_read_timeout,
                 connect=proxy_connect_timeout,
-                read=self._config.http_read_timeout,
+                read=proxy_read_timeout,
                 write=self._config.http_write_timeout,
             ),
         )
@@ -209,9 +210,9 @@ class OpenAIChatTransport(BaseProvider):
             base_url=self._base_url,
             max_retries=0,
             timeout=httpx.Timeout(
-                self._config.http_read_timeout,
+                proxy_read_timeout,
                 connect=proxy_connect_timeout,
-                read=self._config.http_read_timeout,
+                read=proxy_read_timeout,
                 write=self._config.http_write_timeout,
             ),
             http_client=http_client,

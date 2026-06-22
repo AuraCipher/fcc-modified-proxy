@@ -397,25 +397,51 @@ def _init_proxy_pool(settings: Settings) -> None:
 
     pool = ProxyPool.get_instance()
 
-    # Apply proxy pool settings from IpRotationSettings (if available)
-    # so that max_response_ms etc. are configured.
+    # Apply proxy pool settings from IpRotationSettings
+    # Then override from JSON config file (if present).
+    import json as _json
+
     try:
         ip_rot = IpRotationSettings()
     except Exception:
         ip_rot = None
 
+    # Read settings from JSON config to override defaults
+    json_path = _resolve_config_path()
+    try:
+        raw = json_path.read_text(encoding="utf-8")
+        json_cfg: dict = _json.loads(raw)
+    except Exception:
+        json_cfg = {}
+
     if ip_rot is not None:
         s = pool._settings
-        s.proxy_connect_timeout = ip_rot.proxy_connect_timeout
-        s.cooldown_default_hours = ip_rot.cooldown_default_hours
-        s.cooldown_by_provider = ip_rot.cooldown_by_provider
-        s.max_failures_before_dead = ip_rot.max_failures_before_dead
-        s.health_check_interval_s = ip_rot.health_check_interval_minutes * 60.0
-        s.max_response_ms = ip_rot.max_response_ms
+        s.proxy_connect_timeout = json_cfg.get(
+            "proxy_connect_timeout", ip_rot.proxy_connect_timeout
+        )
+        s.proxy_read_timeout = json_cfg.get(
+            "proxy_read_timeout", ip_rot.proxy_read_timeout
+        )
+        s.cooldown_default_hours = json_cfg.get(
+            "cooldown_default_hours", ip_rot.cooldown_default_hours
+        )
+        s.cooldown_by_provider = json_cfg.get(
+            "cooldown_by_provider", ip_rot.cooldown_by_provider
+        )
+        s.max_failures_before_dead = json_cfg.get(
+            "max_failures_before_dead", ip_rot.max_failures_before_dead
+        )
+        s.health_check_interval_s = json_cfg.get(
+            "health_check_interval_minutes", ip_rot.health_check_interval_minutes
+        ) * 60.0
+        s.max_response_ms = json_cfg.get(
+            "max_response_ms", ip_rot.max_response_ms
+        )
         logger.debug(
-            "PROXY_POOL: Settings applied: connect_timeout={}s, cooldown={}h, "
-            "max_failures={}, health_check={}s, max_response_ms={}",
+            "PROXY_POOL: Settings applied: connect_timeout={}s, read_timeout={}s, "
+            "cooldown={}h, max_failures={}, health_check={}s, max_response_ms={}",
             s.proxy_connect_timeout,
+            s.proxy_read_timeout,
             s.cooldown_default_hours,
             s.max_failures_before_dead,
             s.health_check_interval_s,
@@ -423,7 +449,6 @@ def _init_proxy_pool(settings: Settings) -> None:
         )
 
     # Seed from JSON config
-    json_path = _resolve_config_path()
     pool.load_proxies_from_json(json_path)
 
     # Start background health checker (fire-and-forget task)

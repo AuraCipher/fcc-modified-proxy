@@ -91,6 +91,9 @@ class ProxyPoolSettings:
 
     # Connect timeout used when sending real LLM requests via a proxy.
     proxy_connect_timeout: float = 5.0
+    # Read timeout used for proxy connections (overrides http_read_timeout).
+    # The default 120s is too long for a failing proxy.
+    proxy_read_timeout: float = 20.0
     # Default cooldown duration in hours when provider has no specific override.
     cooldown_default_hours: float = 15.0
     # Per-provider cooldown overrides (lowercased provider id → hours).

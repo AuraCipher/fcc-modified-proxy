@@ -178,16 +178,17 @@ class AnthropicMessagesTransport(BaseProvider):
         start = time.monotonic()
 
         transport = httpx.AsyncHTTPTransport(proxy=proxy_url, verify=False)
-        # Use a shorter connect timeout for proxy connections
+        # Use shorter timeouts for proxy connections
         proxy_connect_timeout = getattr(pool._settings, "proxy_connect_timeout", 5.0)
+        proxy_read_timeout = getattr(pool._settings, "proxy_read_timeout", 20.0)
 
         async with httpx.AsyncClient(
             base_url=self._base_url,
             transport=transport,
             timeout=httpx.Timeout(
-                self._config.http_read_timeout,
+                proxy_read_timeout,
                 connect=proxy_connect_timeout,
-                read=self._config.http_read_timeout,
+                read=proxy_read_timeout,
                 write=self._config.http_write_timeout,
             ),
         ) as client:

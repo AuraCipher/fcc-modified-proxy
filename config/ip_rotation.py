@@ -83,6 +83,11 @@ class IpRotationSettings(BaseModel):
         ge=1.0,
         description="Connect timeout (seconds) for proxy connections",
     )
+    proxy_read_timeout: float = Field(
+        default=20.0,
+        ge=5.0,
+        description="Read timeout (seconds) for proxy connections",
+    )
     cooldown_default_hours: float = Field(
         default=15.0,
         ge=0.0,
