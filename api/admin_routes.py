@@ -570,3 +570,76 @@ async def backup_to_file():
             "status": "error",
             "message": str(e),
         }
+
+
+# ====================================================================
+# Proxy Pool Admin API
+# ====================================================================
+
+
+@router.get("/admin/api/proxies")
+async def list_proxies():
+    """List all proxies in the pool with status and stats."""
+    from core.proxy_pool import ProxyPool
+
+    pool = ProxyPool.get_instance()
+    proxies = pool.get_all_proxies()
+    stats = pool.get_proxy_stats()
+    return {"proxies": proxies, "stats": stats}
+
+
+@router.post("/admin/api/proxies/{proxy_id}/reset")
+async def reset_proxy(proxy_id: int):
+    """Reset a single proxy (alive, no cooldown)."""
+    from core.proxy_pool import ProxyPool
+
+    pool = ProxyPool.get_instance()
+    proxies = pool.get_all_proxies()
+    target = next((p for p in proxies if p["id"] == proxy_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Proxy #{proxy_id} not found")
+    ok = pool.reset_proxy(target["proxy_url"])
+    return {"success": ok, "proxy": target["proxy_url"]}
+
+
+@router.post("/admin/api/proxies/reset-all")
+async def reset_all_proxies():
+    """Reset all proxies — alive, no cooldowns, zero failures."""
+    from core.proxy_pool import ProxyPool
+
+    pool = ProxyPool.get_instance()
+    count = pool.reset_all_cooldowns()
+    return {"success": True, "reset_count": count}
+
+
+@router.post("/admin/api/proxies/test/{proxy_id}")
+async def test_single_proxy(proxy_id: int):
+    """Test connectivity for a single proxy."""
+    import httpx
+
+    from core.proxy_pool import ProxyPool, _test_proxy_connectivity
+
+    pool = ProxyPool.get_instance()
+    proxies = pool.get_all_proxies()
+    target = next((p for p in proxies if p["id"] == proxy_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Proxy #{proxy_id} not found")
+
+    timeout = httpx.Timeout(10.0, connect=5.0, read=5.0, write=5.0)
+    ok, resp_ms = await _test_proxy_connectivity(target["proxy_url"], timeout)
+    if ok:
+        pool.reset_proxy(target["proxy_url"])
+    return {"success": ok, "response_ms": resp_ms, "proxy": target["proxy_url"]}
+
+
+@router.post("/admin/api/proxies/reload")
+async def reload_proxies():
+    """Reload proxy list from JSON config file."""
+    from config.ip_rotation import _resolve_config_path
+    from core.proxy_pool import ProxyPool
+
+    pool = ProxyPool.get_instance()
+    json_path = _resolve_config_path()
+    imported = pool.load_proxies_from_json(json_path)
+    stats = pool.get_proxy_stats()
+    return {"imported": imported, "stats": stats}

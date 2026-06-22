@@ -23,7 +23,7 @@ from core.anthropic import (
     append_request_id,
     map_stop_reason,
 )
-from core.ip_rotation import IpRotationService
+from core.proxy_pool import set_request_proxy
 from core.trace import provider_chat_body_snapshot, trace_event
 from providers.base import BaseProvider, ProviderConfig
 from providers.error_mapping import (
@@ -167,19 +167,92 @@ class OpenAIChatTransport(BaseProvider):
         )
 
     async def _create_stream(self, body: dict) -> tuple[Any, dict]:
-        """Create a streaming chat completion with optional IP rotation.
+        """Create a streaming chat completion with smart proxy selection.
 
-        When :class:`IpRotationService` is enabled, VPN proxies are tried first
-        (randomly selected), then direct computer IP only as a last resort.
+        Uses the SQLite-backed ``ProxyPool`` to pick **one random healthy proxy**
+        per request.  If the proxy fails or no proxy is available, falls back
+        to direct computer IP immediately — **no sequential retry loop**.
         """
-        rotation_service = IpRotationService.get_instance()
-        if rotation_service and rotation_service.is_enabled:
-            return await self._create_stream_with_rotation(body, rotation_service)
+        from core.proxy_pool import ProxyPool
 
+        pool = ProxyPool.get_instance()
+        proxy_url = pool.get_available_proxy(self._provider_name.lower())
+
+        if proxy_url is not None:
+            return await self._create_stream_via_proxy(body, proxy_url, pool)
+
+        # No healthy proxy available → direct IP
         return await self._create_stream_direct(body)
 
+    async def _create_stream_via_proxy(
+        self, body: dict, proxy_url: str, pool: ProxyPool
+    ) -> tuple[Any, dict]:
+        """Try to send via *proxy_url*; fall back to direct IP on failure."""
+        import time
+
+        proxy_label = proxy_url.split("@", 1)[1] if "@" in proxy_url else proxy_url
+        start = time.monotonic()
+
+        # Build a proxied client with shorter connect timeout
+        proxy_connect_timeout = getattr(pool._settings, "proxy_connect_timeout", 5.0)
+        http_client = httpx.AsyncClient(
+            proxy=proxy_url,
+            timeout=httpx.Timeout(
+                self._config.http_read_timeout,
+                connect=proxy_connect_timeout,
+                read=self._config.http_read_timeout,
+                write=self._config.http_write_timeout,
+            ),
+        )
+        client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            max_retries=0,
+            timeout=httpx.Timeout(
+                self._config.http_read_timeout,
+                connect=proxy_connect_timeout,
+                read=self._config.http_read_timeout,
+                write=self._config.http_write_timeout,
+            ),
+            http_client=http_client,
+        )
+
+        create_body = self._prepare_create_body(body)
+
+        try:
+            stream = await self._global_rate_limiter.execute_with_retry(
+                client.chat.completions.create,
+                **create_body,
+                stream=True,
+            )
+            elapsed_ms = (time.monotonic() - start) * 1000
+            pool.report_success(proxy_url, round(elapsed_ms, 1))
+            set_request_proxy(f"via {proxy_label}")
+            logger.debug(
+                "PROXY_POOL: {} request OK via {} ({}ms)",
+                self._provider_name,
+                proxy_label,
+                round(elapsed_ms, 1),
+            )
+            return stream, body
+        except Exception as exc:
+            logger.warning(
+                "PROXY_POOL: {} {} via {}, falling back to direct IP",
+                self._provider_name,
+                type(exc).__name__,
+                proxy_label,
+            )
+            pool.report_failure(proxy_url, type(exc).__name__)
+            await http_client.aclose()
+            return await self._create_stream_direct(body)
+
     async def _create_stream_direct(self, body: dict) -> tuple[Any, dict]:
-        """Create stream using the default client (no proxy rotation)."""
+        """Create stream using the default client (no proxy)."""
+        set_request_proxy("direct")
+        logger.debug(
+            "PROXY_POOL: {} using direct computer IP",
+            self._provider_name,
+        )
         try:
             create_body = self._prepare_create_body(body)
             stream = await self._global_rate_limiter.execute_with_retry(
@@ -196,87 +269,6 @@ class OpenAIChatTransport(BaseProvider):
                 self._client.chat.completions.create, **create_retry_body, stream=True
             )
             return stream, retry_body
-
-    async def _create_stream_with_rotation(
-        self, body: dict, service: IpRotationService
-    ) -> tuple[Any, dict]:
-        """Create stream with VPN proxy rotation (no-repeat shuffle).
-
-        Each attempt picks the next proxy from a shuffled copy of the pool.
-        After all VPN proxies are exhausted the direct computer IP is tried
-        as a last resort.
-        """
-        create_body = self._prepare_create_body(body)
-        last_exc: Exception | None = None
-        proxy_order = service.get_random_order()
-
-        for attempt, proxy in enumerate(proxy_order):
-            proxy_label = service.label_for(proxy)
-
-            logger.info(
-                "IP_ROTATION: {} attempt {}/{} using: {}",
-                self._provider_name,
-                attempt + 1,
-                len(proxy_order),
-                proxy_label,
-            )
-
-            # Build a temporary client for this proxy (or use default for direct)
-            client = (
-                self._build_client_for_proxy(proxy)
-                if proxy is not None
-                else self._client
-            )
-
-            try:
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    client.chat.completions.create,
-                    **create_body,
-                    stream=True,
-                )
-                logger.info(
-                    "IP_ROTATION: {} request OK via {}",
-                    self._provider_name,
-                    proxy_label,
-                )
-                return stream, body
-            except Exception as exc:
-                logger.warning(
-                    "IP_ROTATION: {} {} via {} (attempt {}/{}), rotating proxy",
-                    self._provider_name,
-                    type(exc).__name__,
-                    proxy_label,
-                    attempt + 1,
-                    len(proxy_order),
-                )
-                last_exc = exc
-                continue
-
-        # All VPN proxies (and possibly direct IP) failed.
-        # Try a retry body with the default client as a final fallback.
-        if last_exc is not None:
-            retry_body = self._get_retry_request_body(last_exc, body)
-            if retry_body is not None:
-                create_retry_body = self._prepare_create_body(retry_body)
-                logger.info(
-                    "IP_ROTATION: {} fallback retry with modified request body",
-                    self._provider_name,
-                )
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    self._client.chat.completions.create,
-                    **create_retry_body,
-                    stream=True,
-                )
-                return stream, retry_body
-
-        logger.error(
-            "IP_ROTATION: {} all {} attempts exhausted; last error: {}",
-            self._provider_name,
-            len(proxy_order),
-            last_exc,
-        )
-        assert last_exc is not None
-        raise last_exc
 
     def _restore_aliased_tool_arguments(
         self, argument_json: str, aliases: dict[str, str]

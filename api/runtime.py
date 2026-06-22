@@ -16,6 +16,7 @@ from config.hot_reload import start_reload_watcher, stop_reload_watcher
 from config.ip_rotation import IpRotationSettings
 from config.settings import Settings, _reload_cached_settings, get_settings
 from core.ip_rotation import IpRotationService
+from core.proxy_pool import ProxyAccessLogFormatter, ProxyPool, ProxyPoolSettings
 from core.token_tracking import TokenTracker
 from providers.exceptions import ServiceUnavailableError
 from providers.registry import ProviderRegistry
@@ -118,6 +119,8 @@ class AppRuntime:
                     fallback_to_direct=self.settings.ip_rotation_fallback_to_direct,
                 )
             )
+            # Initialize smart proxy pool (SQLite-backed, persistent state)
+            _init_proxy_pool(self.settings)
             # Start hot-reload watcher for .env changes
             start_reload_watcher(_reload_cached_settings)
             # Initialize token tracker (loads persisted data from DB)
@@ -355,3 +358,59 @@ class AppRuntime:
             timeout_s=2.0,
             log_verbose_errors=verbose,
         )
+
+
+def _install_proxy_access_filter() -> None:
+    """Patch uvicorn access logger to show proxy info inline on log lines.
+
+    Wraps each handler's formatter with ``ProxyAccessLogFormatter`` which
+    appends ``(via host:port)`` or ``(direct)`` to the formatted access log
+    line whenever ``set_request_proxy()`` has been called for the request.
+    """
+    access_logger = logging.getLogger("uvicorn.access")
+
+    for handler in access_logger.handlers:
+        if not hasattr(handler, "formatter") or handler.formatter is None:
+            continue
+        if isinstance(handler.formatter, ProxyAccessLogFormatter):
+            continue  # already wrapped
+        handler.formatter = ProxyAccessLogFormatter(handler.formatter)
+        logger.info("PROXY_POOL: Wrapped access handler with ProxyAccessLogFormatter")
+
+    if access_logger.handlers:
+        logger.info(
+            "PROXY_POOL: Access log proxy injection active ({} handlers)",
+            len(access_logger.handlers),
+        )
+    else:
+        logger.warning(
+            "PROXY_POOL: No uvicorn.access handlers found — proxy label won't appear"
+        )
+
+
+def _init_proxy_pool(settings: Settings) -> None:
+    """Initialise the SQLite-backed ``ProxyPool`` singleton and seed it.
+
+    Idempotent — safe to call multiple times (e.g. during hot-reload).
+    """
+    from config.ip_rotation import _resolve_config_path
+
+    pool = ProxyPool.get_instance()
+
+    # Seed from JSON config
+    json_path = _resolve_config_path()
+    pool.load_proxies_from_json(json_path)
+
+    # Start background health checker (fire-and-forget task)
+    import asyncio
+
+    asyncio.create_task(pool.start_background_health_check())
+
+    logger.info(
+        "PROXY_POOL: Initialised (config={}, proxies={})",
+        json_path,
+        pool.get_proxy_stats().get("total", 0),
+    )
+
+    # Install proxy access log filter on uvicorn access logger
+    _install_proxy_access_filter()

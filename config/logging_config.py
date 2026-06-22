@@ -51,6 +51,8 @@ def _nim_console_log_filter(record: Any) -> bool:
     message = str(record.get("message", ""))
     if message.startswith("IP_ROTATION:"):
         return True
+    if message.startswith("PROXY_POOL:"):
+        return True
     return str(record["name"]).startswith("providers.nvidia_nim")
 
 

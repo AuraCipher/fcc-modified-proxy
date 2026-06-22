@@ -10,7 +10,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from config.nim import NimSettings
-from core.ip_rotation import IpRotationService
+from core.proxy_pool import set_request_proxy
 from providers.base import ProviderConfig
 from providers.defaults import NVIDIA_NIM_DEFAULT_BASE
 from providers.openai_compat import OpenAIChatTransport
@@ -140,28 +140,93 @@ class NvidiaNimProvider(OpenAIChatTransport):
         return nim_tool_argument_aliases_from_body(body)
 
     async def _create_stream(self, body: dict) -> tuple[Any, dict]:
-        """Create a streaming chat completion with IP rotation + optional key rotation."""
-        rotation_service = IpRotationService.get_instance()
-        use_rotation = rotation_service and rotation_service.is_enabled
+        """Create a streaming chat completion with smart proxy + key rotation.
 
-        if not self._use_pooled_keys:
-            if use_rotation:
-                assert rotation_service is not None  # narrow for type checker
-                return await self._nim_create_stream_with_rotation(
-                    body, rotation_service
-                )
-            return await self._nim_create_stream_direct(body)
+        Uses the SQLite-backed ``ProxyPool`` to pick **one random healthy proxy**
+        per request.  If the proxy fails or no proxy is available, falls back
+        to the existing key-pool (or direct) path — **no sequential proxy loop**.
+        """
+        from core.proxy_pool import ProxyPool
 
-        # --- Multi-key path (API key pool) ---
-        if use_rotation:
-            assert rotation_service is not None  # narrow for type checker
-            return await self._nim_create_stream_pool_with_rotation(
-                body, rotation_service
+        pool = ProxyPool.get_instance()
+        proxy_url = pool.get_available_proxy(self._provider_name.lower())
+
+        if proxy_url is not None:
+            return await self._nim_create_stream_via_proxy(body, proxy_url, pool)
+
+        # No healthy proxy → use existing key-pool / direct path
+        if self._use_pooled_keys:
+            return await self._nim_create_stream_pool(body)
+        return await self._nim_create_stream_direct(body)
+
+    async def _nim_create_stream_via_proxy(
+        self, body: dict, proxy_url: str, pool: ProxyPool
+    ) -> tuple[Any, dict]:
+        """Try via *proxy_url* with the primary API key; fall back on failure."""
+        import time
+
+        proxy_label = proxy_url.split("@", 1)[1] if "@" in proxy_url else proxy_url
+        start = time.monotonic()
+
+        proxy_connect_timeout = getattr(pool._settings, "proxy_connect_timeout", 5.0)
+        http_client = httpx.AsyncClient(
+            proxy=proxy_url,
+            timeout=httpx.Timeout(
+                self._config.http_read_timeout,
+                connect=proxy_connect_timeout,
+                read=self._config.http_read_timeout,
+                write=self._config.http_write_timeout,
+            ),
+        )
+        proxied_client = AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            max_retries=0,
+            timeout=httpx.Timeout(
+                self._config.http_read_timeout,
+                connect=proxy_connect_timeout,
+                read=self._config.http_read_timeout,
+                write=self._config.http_write_timeout,
+            ),
+            http_client=http_client,
+        )
+
+        create_body = self._prepare_create_body(body)
+
+        try:
+            stream = await self._global_rate_limiter.execute_with_retry(
+                proxied_client.chat.completions.create,
+                **create_body,
+                stream=True,
             )
-        return await self._nim_create_stream_pool(body)
+            elapsed_ms = (time.monotonic() - start) * 1000
+            pool.report_success(proxy_url, round(elapsed_ms, 1))
+            set_request_proxy(f"via {proxy_label}")
+            logger.debug(
+                "PROXY_POOL: {} request OK via {} ({}ms)",
+                self._provider_name,
+                proxy_label,
+                round(elapsed_ms, 1),
+            )
+            return stream, body
+        except Exception as exc:
+            logger.warning(
+                "PROXY_POOL: {} {} via {}, falling back to {} path",
+                self._provider_name,
+                type(exc).__name__,
+                proxy_label,
+                "key pool" if self._use_pooled_keys else "direct",
+            )
+            pool.report_failure(proxy_url, type(exc).__name__)
+            await http_client.aclose()
+            # Fall back to existing pool/direct logic
+            if self._use_pooled_keys:
+                return await self._nim_create_stream_pool(body)
+            return await self._nim_create_stream_direct(body)
 
     async def _nim_create_stream_pool(self, body: dict) -> tuple[Any, dict]:
         """Multi-key path: rotate through API keys (no IP rotation)."""
+        set_request_proxy("direct")
         create_body = self._prepare_create_body(body)
 
         async def _create_with_client(client: AsyncOpenAI) -> Any:
@@ -213,6 +278,7 @@ class NvidiaNimProvider(OpenAIChatTransport):
 
     async def _nim_create_stream_direct(self, body: dict) -> tuple[Any, dict]:
         """Original single-key path (no API key pool, no IP rotation)."""
+        set_request_proxy("direct")
         try:
             create_body = self._prepare_create_body(body)
             stream = await self._global_rate_limiter.execute_with_retry(
@@ -233,197 +299,6 @@ class NvidiaNimProvider(OpenAIChatTransport):
                 stream=True,
             )
             return stream, retry_body
-
-    async def _nim_create_stream_with_rotation(
-        self, body: dict, service: IpRotationService
-    ) -> tuple[Any, dict]:
-        """Single-key path with VPN proxy rotation (no-repeat shuffle)."""
-        create_body = self._prepare_create_body(body)
-        last_exc: Exception | None = None
-        proxy_order = service.get_random_order()
-
-        for attempt, proxy in enumerate(proxy_order):
-            proxy_label = service.label_for(proxy)
-
-            logger.info(
-                "IP_ROTATION: {} attempt {}/{} using: {}",
-                self._provider_name,
-                attempt + 1,
-                len(proxy_order),
-                proxy_label,
-            )
-
-            client = (
-                self._build_client_for_proxy(proxy)
-                if proxy is not None
-                else self._client
-            )
-
-            try:
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    client.chat.completions.create,
-                    **create_body,
-                    stream=True,
-                )
-                logger.info(
-                    "IP_ROTATION: {} request OK via {}",
-                    self._provider_name,
-                    proxy_label,
-                )
-                return stream, body
-            except Exception as exc:
-                logger.warning(
-                    "IP_ROTATION: {} {} via {} (attempt {}/{}), rotating proxy",
-                    self._provider_name,
-                    type(exc).__name__,
-                    proxy_label,
-                    attempt + 1,
-                    len(proxy_order),
-                )
-                last_exc = exc
-                continue
-
-        # Final fallback: retry_body with default client
-        if last_exc is not None:
-            retry_body = self._get_retry_request_body(last_exc, body)
-            if retry_body is not None:
-                create_retry_body = self._prepare_create_body(retry_body)
-                logger.info(
-                    "IP_ROTATION: {} fallback retry with modified request body",
-                    self._provider_name,
-                )
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    self._client.chat.completions.create,
-                    **create_retry_body,
-                    stream=True,
-                )
-                return stream, retry_body
-
-        logger.error(
-            "IP_ROTATION: {} all {} attempts exhausted; last error: {}",
-            self._provider_name,
-            len(proxy_order),
-            last_exc,
-        )
-        assert last_exc is not None
-        raise last_exc
-
-    async def _nim_create_stream_pool_with_rotation(
-        self, body: dict, service: IpRotationService
-    ) -> tuple[Any, dict]:
-        """Multi-key (API key pool) path with VPN proxy rotation (no-repeat shuffle).
-
-        For each proxy, try all available API keys before moving to the next proxy.
-        """
-        create_body = self._prepare_create_body(body)
-        last_exc: Exception | None = None
-        proxy_order = service.get_random_order()
-
-        async def _run_with_pool(
-            runner: Callable[[AsyncOpenAI], Any],
-        ) -> Any:
-            async def _on_retryable(lease: Any, exc: BaseException) -> None:
-                status = retryable_upstream_status(exc)
-                if status is not None:
-                    await lease.mark_rate_limited(exc=exc)
-
-            return await self._key_pool.execute_with_retry(
-                runner,
-                on_retryable_error=_on_retryable,
-            )
-
-        for attempt, proxy in enumerate(proxy_order):
-            proxy_label = service.label_for(proxy)
-
-            logger.info(
-                "IP_ROTATION: {} attempt {}/{} using: {} (key pool)",
-                self._provider_name,
-                attempt + 1,
-                len(proxy_order),
-                proxy_label,
-            )
-
-            try:
-                if proxy is not None:
-                    # Build a proxied client for this proxy
-                    proxied_client = self._build_client_for_proxy(proxy)
-
-                    async def _create_with_client(client: AsyncOpenAI) -> Any:
-                        return await client.chat.completions.create(
-                            **create_body, stream=True
-                        )
-
-                    # For proxied requests, use the single proxied client directly
-                    # (key pool not available through proxy)
-                    stream = await self._global_rate_limiter.execute_with_retry(
-                        lambda c=proxied_client: _create_with_client(c),
-                        proactive=False,
-                    )
-                else:
-                    # Direct IP: use key pool as normal
-                    async def _create_with_pool_client(client: AsyncOpenAI) -> Any:
-                        return await client.chat.completions.create(
-                            **create_body, stream=True
-                        )
-
-                    async def _create() -> Any:
-                        return await _run_with_pool(_create_with_pool_client)
-
-                    stream = await self._global_rate_limiter.execute_with_retry(
-                        _create,
-                        proactive=False,
-                    )
-
-                logger.info(
-                    "IP_ROTATION: {} request OK via {} (key pool)",
-                    self._provider_name,
-                    proxy_label,
-                )
-                return stream, body
-            except Exception as exc:
-                logger.warning(
-                    "IP_ROTATION: {} {} via {} (attempt {}/{}), rotating proxy",
-                    self._provider_name,
-                    type(exc).__name__,
-                    proxy_label,
-                    attempt + 1,
-                    len(proxy_order),
-                )
-                last_exc = exc
-                continue
-
-        # Final fallback: retry_body with key pool
-        if last_exc is not None:
-            retry_body = self._get_retry_request_body(last_exc, body)
-            if retry_body is not None:
-                create_retry_body = self._prepare_create_body(retry_body)
-                logger.info(
-                    "IP_ROTATION: {} fallback retry with modified request body",
-                    self._provider_name,
-                )
-
-                async def _create_fallback(client: AsyncOpenAI) -> Any:
-                    return await client.chat.completions.create(
-                        **create_retry_body, stream=True
-                    )
-
-                async def _run_fallback() -> Any:
-                    return await _run_with_pool(_create_fallback)
-
-                stream = await self._global_rate_limiter.execute_with_retry(
-                    _run_fallback,
-                    proactive=False,
-                )
-                return stream, retry_body
-
-        logger.error(
-            "IP_ROTATION: {} all {} attempts exhausted; last error: {}",
-            self._provider_name,
-            len(proxy_order),
-            last_exc,
-        )
-        assert last_exc is not None
-        raise last_exc
 
     def _get_retry_request_body(self, error: Exception, body: dict) -> dict | None:
         """Retry once with a downgraded body when NIM rejects a known field."""

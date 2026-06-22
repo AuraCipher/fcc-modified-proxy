@@ -6,6 +6,7 @@ const state = {
   activeView: "providers",
   tokenAutoRefreshInterval: null, // Auto-refresh interval for token usage view
   tokenPeriod: "all", // Current time filter for token usage
+  proxyAutoRefreshInterval: null, // Auto-refresh interval for proxy view
 };
 
 const MASKED_SECRET = "********";
@@ -37,6 +38,13 @@ const VIEW_GROUPS = [
     title: "Token Usage",
     sections: [],
     containerId: "tokenTracking",
+  },
+  {
+    id: "proxies",
+    label: "Proxies",
+    title: "Proxy Pool",
+    sections: [],
+    containerId: "proxyTracking",
   },
 ];
 
@@ -174,6 +182,17 @@ function setActiveView(viewId, { scroll = false } = {}) {
     loadTokenData();
     // Set up auto-refresh every 30 seconds (30000 milliseconds)
     state.tokenAutoRefreshInterval = setInterval(loadTokenDataSilent, 30000);
+  }
+
+  // Load proxy data when switching to proxies view
+  if (activeView.id === "proxies") {
+    loadProxyData();
+    state.proxyAutoRefreshInterval = setInterval(loadProxyDataSilent, 15000);
+  } else {
+    if (state.proxyAutoRefreshInterval) {
+      clearInterval(state.proxyAutoRefreshInterval);
+      state.proxyAutoRefreshInterval = null;
+    }
   }
 
   if (scroll) {
@@ -636,12 +655,159 @@ function renderTokenData(data) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Proxy Pool UI
+// ---------------------------------------------------------------------------
+
+async function loadProxyData() {
+  try {
+    const data = await api("/admin/api/proxies");
+    renderProxyData(data);
+  } catch (error) {
+    showMessage(`Failed to load proxy data: ${error.message}`, "error");
+  }
+}
+
+async function loadProxyDataSilent() {
+  try {
+    const data = await api("/admin/api/proxies");
+    renderProxyData(data);
+  } catch (error) {
+    console.warn("Failed to refresh proxy data:", error.message);
+  }
+}
+
+function renderProxyData(data) {
+  const stats = data.stats || {};
+  byId("proxyAliveCount").textContent = stats.alive ?? 0;
+  byId("proxyDeadCount").textContent = stats.dead ?? 0;
+  byId("proxyCooldownCount").textContent = stats.on_cooldown ?? 0;
+  byId("proxyTotalCount").textContent = stats.total ?? 0;
+
+  const list = byId("proxyList");
+  list.innerHTML = "";
+
+  const proxies = data.proxies || [];
+  if (proxies.length === 0) {
+    list.innerHTML =
+      '<div class="empty-state">No proxies configured. Add proxies via <code>~/.fcc/ip_rotation.json</code>.</div>';
+    return;
+  }
+
+  proxies.forEach((proxy) => {
+    const now = new Date().toISOString();
+    const onCooldown = proxy.cooldown_until && proxy.cooldown_until > now;
+    const isDead = !proxy.is_alive;
+
+    let statusClass = "status-ok";
+    let statusLabel = "Alive";
+    if (isDead) {
+      statusClass = "status-dead";
+      statusLabel = "Dead";
+    } else if (onCooldown) {
+      statusClass = "status-cooldown";
+      statusLabel = "Cooldown";
+    }
+
+    const row = document.createElement("div");
+    row.className = "proxy-row";
+    row.innerHTML = `
+      <div class="proxy-info">
+        <span class="proxy-flag">${proxy.flag || ""}</span>
+        <span class="proxy-host">${proxy.proxy_url.split("@")[1] || proxy.proxy_url}</span>
+        <span class="proxy-location">${proxy.city || ""}${proxy.city && proxy.country ? ", " : ""}${proxy.country || ""}</span>
+      </div>
+      <div class="proxy-status-col">
+        <span class="proxy-status-badge ${statusClass}">${statusLabel}</span>
+      </div>
+      <div class="proxy-cooldown-col">
+        ${onCooldown ? `<span class="proxy-cooldown-timer">until ${new Date(proxy.cooldown_until).toLocaleString()}</span>` : '<span class="proxy-cooldown-none">—</span>'}
+      </div>
+      <div class="proxy-stats-col">
+        <span class="proxy-stat">${proxy.total_requests || 0} req</span>
+        <span class="proxy-stat">${proxy.total_errors || 0} err</span>
+        <span class="proxy-stat">${proxy.fail_count || 0} fail</span>
+        ${proxy.avg_response_ms ? `<span class="proxy-stat">${Math.round(proxy.avg_response_ms)}ms</span>` : ""}
+      </div>
+      <div class="proxy-actions-col">
+        <button class="proxy-btn proxy-btn-reset" data-proxy-id="${proxy.id}" ${!isDead && !onCooldown ? "disabled" : ""}>Reset</button>
+        <button class="proxy-btn proxy-btn-test" data-proxy-id="${proxy.id}">Test</button>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+
+  // Attach event handlers for reset buttons
+  list.querySelectorAll(".proxy-btn-reset").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const proxyId = btn.dataset.proxyId;
+      try {
+        await api(`/admin/api/proxies/${proxyId}/reset`, { method: "POST" });
+        await loadProxyData();
+        showMessage(`Proxy #${proxyId} reset`);
+      } catch (error) {
+        showMessage(`Reset failed: ${error.message}`, "error");
+      }
+    });
+  });
+
+  // Attach event handlers for test buttons
+  list.querySelectorAll(".proxy-btn-test").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const proxyId = btn.dataset.proxyId;
+      btn.textContent = "Testing...";
+      btn.disabled = true;
+      try {
+        const result = await api(`/admin/api/proxies/test/${proxyId}`, {
+          method: "POST",
+        });
+        showMessage(
+          result.success
+            ? `Proxy #${proxyId} OK (${result.response_ms}ms)`
+            : `Proxy #${proxyId} unreachable (${result.response_ms}ms)`,
+        );
+        await loadProxyData();
+      } catch (error) {
+        showMessage(`Test failed: ${error.message}`, "error");
+        await loadProxyData();
+      }
+    });
+  });
+}
+
 byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);
 byId("refreshTokensButton")?.addEventListener("click", loadTokenData);
 byId("tokenPeriodFilter")?.addEventListener("change", (e) => {
   state.tokenPeriod = e.target.value;
   loadTokenData();
+});
+
+// Proxy pool event handlers
+byId("refreshProxiesButton")?.addEventListener("click", loadProxyData);
+byId("resetAllProxiesButton")?.addEventListener("click", async () => {
+  if (
+    !confirm("Reset all proxies? This clears all cooldowns and failure states.")
+  )
+    return;
+  try {
+    const result = await api("/admin/api/proxies/reset-all", {
+      method: "POST",
+    });
+    showMessage(`Reset ${result.reset_count} proxies`);
+    await loadProxyData();
+  } catch (error) {
+    showMessage(`Reset failed: ${error.message}`, "error");
+  }
+});
+byId("reloadProxiesButton")?.addEventListener("click", async () => {
+  try {
+    const result = await api("/admin/api/proxies/reload", { method: "POST" });
+    showMessage(`Imported ${result.imported} proxies from config`);
+    await loadProxyData();
+  } catch (error) {
+    showMessage(`Reload failed: ${error.message}`, "error");
+  }
 });
 
 load().catch((error) => {

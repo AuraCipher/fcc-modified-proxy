@@ -665,3 +665,180 @@ textarea {
         flex: 1;
     }
 }
+
+/* ====================================================================
+       Proxy Pool UI
+       ==================================================================== */
+
+.proxy-section {
+    padding: 20px;
+}
+
+.proxy-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.proxy-stats-bar {
+    display: flex;
+    gap: 16px;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 13px;
+}
+
+.proxy-stat-badge {
+    color: var(--muted);
+}
+
+.proxy-stat-badge strong {
+    color: var(--text);
+}
+
+.proxy-table-header {
+    display: grid;
+    grid-template-columns: 2fr 100px 160px 1fr 140px;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+}
+
+.proxy-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.proxy-row {
+    display: grid;
+    grid-template-columns: 2fr 100px 160px 1fr 140px;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    align-items: center;
+    font-size: 13px;
+}
+
+.proxy-row:hover {
+    background: var(--panel);
+}
+
+.proxy-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow: hidden;
+}
+
+.proxy-flag {
+    font-size: 16px;
+    margin-right: 6px;
+}
+
+.proxy-host {
+    font-family: monospace;
+    font-size: 13px;
+    color: var(--text);
+    word-break: break-all;
+}
+
+.proxy-location {
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.proxy-status-col {
+    display: flex;
+    align-items: center;
+}
+
+.proxy-status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-ok {
+    background: #1a3a2a;
+    color: var(--ok);
+}
+
+.status-dead {
+    background: #3a1a1a;
+    color: var(--error);
+}
+
+.status-cooldown {
+    background: #3a2a1a;
+    color: var(--warn);
+}
+
+.proxy-cooldown-col {
+    font-size: 11px;
+}
+
+.proxy-cooldown-timer {
+    color: var(--warn);
+}
+
+.proxy-cooldown-none {
+    color: var(--muted);
+}
+
+.proxy-stats-col {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.proxy-stat {
+}
+
+.proxy-actions-col {
+    display: flex;
+    gap: 6px;
+}
+
+.proxy-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.proxy-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+.proxy-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.empty-state code {
+    background: var(--panel);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+}

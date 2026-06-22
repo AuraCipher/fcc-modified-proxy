@@ -77,6 +77,32 @@ class IpRotationSettings(BaseModel):
         description="Whether to try direct computer IP after all VPN proxies fail",
     )
 
+    # --- Proxy Pool Settings (used by core.proxy_pool.ProxyPool) ---
+    proxy_connect_timeout: float = Field(
+        default=5.0,
+        ge=1.0,
+        description="Connect timeout (seconds) for proxy connections",
+    )
+    cooldown_default_hours: float = Field(
+        default=15.0,
+        ge=0.0,
+        description="Default cooldown hours when a proxy is rate-limited",
+    )
+    cooldown_by_provider: dict[str, float] = Field(
+        default_factory=lambda: {"opencode": 15.0, "zen": 15.0},
+        description="Per-provider cooldown overrides (lowercase id -> hours)",
+    )
+    max_failures_before_dead: int = Field(
+        default=3,
+        ge=1,
+        description="Consecutive failures before marking a proxy dead",
+    )
+    health_check_interval_minutes: float = Field(
+        default=5.0,
+        ge=1.0,
+        description="Interval (minutes) for background proxy health checks",
+    )
+
     @field_validator("proxies", mode="before")
     @classmethod
     def strip_empty_proxies(cls, v: list[str]) -> list[str]:

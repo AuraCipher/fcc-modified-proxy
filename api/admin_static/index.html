@@ -164,6 +164,81 @@
                             </div>
                         </div>
                     </section>
+
+                    <!-- ========== PROXIES VIEW ========== -->
+                    <section
+                        id="view-proxies"
+                        class="admin-view"
+                        data-view="proxies"
+                        hidden
+                    >
+                        <div id="proxyTracking" class="proxy-section">
+                            <div class="section-header">
+                                <h3>Proxy Pool</h3>
+                                <div class="proxy-actions">
+                                    <button
+                                        id="refreshProxiesButton"
+                                        class="secondary-button"
+                                        type="button"
+                                    >
+                                        Refresh
+                                    </button>
+                                    <button
+                                        id="resetAllProxiesButton"
+                                        class="secondary-button"
+                                        type="button"
+                                    >
+                                        Reset All Cooldowns
+                                    </button>
+                                    <button
+                                        id="reloadProxiesButton"
+                                        class="secondary-button"
+                                        type="button"
+                                    >
+                                        Reload from Config
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="proxy-stats-bar">
+                                <span class="proxy-stat-badge">
+                                    🟢 Alive:
+                                    <strong id="proxyAliveCount">0</strong>
+                                </span>
+                                <span class="proxy-stat-badge">
+                                    🔴 Dead:
+                                    <strong id="proxyDeadCount">0</strong>
+                                </span>
+                                <span class="proxy-stat-badge">
+                                    ⏳ Cooldown:
+                                    <strong id="proxyCooldownCount">0</strong>
+                                </span>
+                                <span class="proxy-stat-badge">
+                                    Total:
+                                    <strong id="proxyTotalCount">0</strong>
+                                </span>
+                            </div>
+
+                            <div class="proxy-table-header">
+                                <span class="proxy-th proxy-th-info"
+                                    >Proxy</span
+                                >
+                                <span class="proxy-th proxy-th-status"
+                                    >Status</span
+                                >
+                                <span class="proxy-th proxy-th-cooldown"
+                                    >Cooldown</span
+                                >
+                                <span class="proxy-th proxy-th-stats"
+                                    >Stats</span
+                                >
+                                <span class="proxy-th proxy-th-actions"
+                                    >Actions</span
+                                >
+                            </div>
+                            <div id="proxyList" class="proxy-list"></div>
+                        </div>
+                    </section>
                 </div>
             </main>
 
