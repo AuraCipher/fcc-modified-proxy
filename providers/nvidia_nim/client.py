@@ -210,14 +210,24 @@ class NvidiaNimProvider(OpenAIChatTransport):
             )
             return stream, body
         except Exception as exc:
-            logger.warning(
-                "PROXY_POOL: {} {} via {}, falling back to {} path",
-                self._provider_name,
-                type(exc).__name__,
-                proxy_label,
-                "key pool" if self._use_pooled_keys else "direct",
-            )
-            pool.report_failure(proxy_url, type(exc).__name__)
+            # Detect rate-limit (429) → set cooldown instead of marking dead
+            if getattr(exc, "status_code", None) == 429:
+                logger.warning(
+                    "PROXY_POOL: {} rate-limited (429) via {}, falling back to {} path",
+                    self._provider_name,
+                    proxy_label,
+                    "key pool" if self._use_pooled_keys else "direct",
+                )
+                pool.report_rate_limit(proxy_url)
+            else:
+                logger.warning(
+                    "PROXY_POOL: {} {} via {}, falling back to {} path",
+                    self._provider_name,
+                    type(exc).__name__,
+                    proxy_label,
+                    "key pool" if self._use_pooled_keys else "direct",
+                )
+                pool.report_failure(proxy_url, type(exc).__name__)
             await http_client.aclose()
             # Fall back to existing pool/direct logic
             if self._use_pooled_keys:

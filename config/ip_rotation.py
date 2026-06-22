@@ -102,6 +102,11 @@ class IpRotationSettings(BaseModel):
         ge=1.0,
         description="Interval (minutes) for background proxy health checks",
     )
+    max_response_ms: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Max average response time (ms) before auto-culling a proxy (0 = disabled)",
+    )
 
     @field_validator("proxies", mode="before")
     @classmethod

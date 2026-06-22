@@ -236,13 +236,22 @@ class OpenAIChatTransport(BaseProvider):
             )
             return stream, body
         except Exception as exc:
-            logger.warning(
-                "PROXY_POOL: {} {} via {}, falling back to direct IP",
-                self._provider_name,
-                type(exc).__name__,
-                proxy_label,
-            )
-            pool.report_failure(proxy_url, type(exc).__name__)
+            # Detect rate-limit (429) → set cooldown instead of marking dead
+            if getattr(exc, "status_code", None) == 429:
+                logger.warning(
+                    "PROXY_POOL: {} rate-limited (429) via {}, falling back to direct IP",
+                    self._provider_name,
+                    proxy_label,
+                )
+                pool.report_rate_limit(proxy_url)
+            else:
+                logger.warning(
+                    "PROXY_POOL: {} {} via {}, falling back to direct IP",
+                    self._provider_name,
+                    type(exc).__name__,
+                    proxy_label,
+                )
+                pool.report_failure(proxy_url, type(exc).__name__)
             await http_client.aclose()
             return await self._create_stream_direct(body)
 

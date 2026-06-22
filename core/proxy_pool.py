@@ -99,6 +99,8 @@ class ProxyPoolSettings:
     max_failures_before_dead: int = 3
     # How often (seconds) the background health checker tests dead proxies.
     health_check_interval_s: float = 300.0  # 5 minutes
+    # Max average response time (ms) before a proxy is auto-culled as too slow.
+    max_response_ms: float = 0.0  # 0 = disabled
 
 
 # ---------------------------------------------------------------------------
@@ -343,10 +345,14 @@ class ProxyPool:
             return None
 
     def report_success(self, proxy_url: str, response_ms: float = 0.0) -> None:
-        """Record a successful request through *proxy_url*."""
+        """Record a successful request through *proxy_url*.
+
+        If the proxy's average response time exceeds ``max_response_ms``,
+        the proxy is auto-culled (marked dead) to keep the pool fast.
+        """
         try:
             with self._get_conn() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE proxy_pool SET
                         is_alive = 1,
@@ -356,13 +362,39 @@ class ProxyPool:
                         last_success_at = datetime('now'),
                         avg_response_ms = CASE
                             WHEN avg_response_ms = 0 THEN ?
-                            ELSE (avg_response_ms * (total_requests - 1) + ?) / total_requests
+                            ELSE (avg_response_ms * total_requests + ?) / (total_requests + 1)
                         END
                     WHERE proxy_url = ?
+                    RETURNING avg_response_ms
                     """,
                     (response_ms, response_ms, proxy_url),
                 )
+                row = cur.fetchone()
                 conn.commit()
+
+            # Auto-cull if avg response exceeds threshold
+            if (
+                row
+                and self._settings.max_response_ms > 0
+                and row["avg_response_ms"] > self._settings.max_response_ms
+            ):
+                logger.warning(
+                    "PROXY_POOL: {} avg response {:.0f}ms exceeds limit {:.0f}ms — culling",
+                    _mask_url(proxy_url),
+                    row["avg_response_ms"],
+                    self._settings.max_response_ms,
+                )
+                with self._get_conn() as conn:
+                    conn.execute(
+                        """
+                        UPDATE proxy_pool SET
+                            is_alive = 0,
+                            last_error_type = 'too_slow'
+                        WHERE proxy_url = ?
+                        """,
+                        (proxy_url,),
+                    )
+                    conn.commit()
         except Exception as exc:
             logger.debug("PROXY_POOL: report_success failed: {}", exc)
 
@@ -588,14 +620,20 @@ class ProxyPool:
         return revived
 
     def _health_check_candidates(self) -> list[str]:
-        """Return up to 3 proxy URLs that need testing."""
+        """Return up to 3 proxy URLs that need testing.
+
+        Skips proxies that were rate-limited or culled for slowness —
+        those are policy decisions, not connectivity issues.
+        """
         try:
             with self._get_conn() as conn:
                 rows = conn.execute(
                     """
                     SELECT proxy_url FROM proxy_pool
-                    WHERE is_alive = 0
-                       OR cooldown_until > datetime('now')
+                    WHERE (is_alive = 0
+                       OR cooldown_until > datetime('now'))
+                      AND (last_error_type IS NULL
+                           OR LOWER(last_error_type) NOT IN ('rate_limit', 'too_slow'))
                     ORDER BY RANDOM()
                     LIMIT 3
                     """
