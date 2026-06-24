@@ -18,6 +18,8 @@ from config.settings import get_settings
 from core.trace import extract_claude_session_id_from_headers, trace_event
 from providers.exceptions import ProviderError
 
+_proxy_access_filter_installed = False
+
 from .admin_routes import router as admin_router
 from .routes import router
 from .runtime import AppRuntime, startup_failure_message
@@ -101,6 +103,12 @@ def create_app(*, lifespan_enabled: bool = True) -> FastAPI:
     @app.middleware("http")
     async def track_active_requests(request: Request, call_next):
         """Track active requests for hot-reload coordination."""
+        global _proxy_access_filter_installed
+        if not _proxy_access_filter_installed:
+            from api.runtime import _install_proxy_access_filter
+            _install_proxy_access_filter()
+            _proxy_access_filter_installed = True
+
         reload_mgr = get_reload_manager()
         reload_mgr.register_request_start()
         try:

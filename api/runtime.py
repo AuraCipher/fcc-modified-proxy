@@ -461,6 +461,3 @@ def _init_proxy_pool(settings: Settings) -> None:
         json_path,
         pool.get_proxy_stats().get("total", 0),
     )
-
-    # Install proxy access log filter on uvicorn access logger
-    _install_proxy_access_filter()
