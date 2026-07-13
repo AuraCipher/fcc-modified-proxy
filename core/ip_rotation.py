@@ -47,7 +47,7 @@ class IpRotationService:
         instance = cls(settings)
         cls._instance = instance
         if instance.is_enabled:
-            logger.info(
+            logger.debug(
                 "IP_ROTATION: Enabled with {} proxies, "
                 "max_attempts={}, fallback_to_direct={}",
                 instance.proxy_count,

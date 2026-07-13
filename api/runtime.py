@@ -16,18 +16,29 @@ from config.hot_reload import start_reload_watcher, stop_reload_watcher
 from config.ip_rotation import IpRotationSettings
 from config.settings import Settings, _reload_cached_settings, get_settings
 from core.ip_rotation import IpRotationService
-from core.proxy_pool import ProxyAccessLogFormatter, ProxyPool, ProxyPoolSettings
+from core.proxy_pool import (
+    DEFERRED_ACCESS_LOG_EXTRA,
+    ProxyAccessLogFormatter,
+    ProxyPool,
+    _SuppressUvicornAccessLogFilter,
+    clear_request_proxy,
+    proxy_label_from_store,
+)
 from core.token_tracking import TokenTracker
 from providers.exceptions import ServiceUnavailableError
 from providers.registry import ProviderRegistry
 
 if TYPE_CHECKING:
     from cli.manager import CLISessionManager
+    from fastapi import Request
     from messaging.handler import ClaudeMessageHandler
     from messaging.platforms.base import MessagingPlatform
     from messaging.session import SessionStore
+    from starlette.responses import Response
+    from starlette.types import Receive, Scope, Send
 
 _SHUTDOWN_TIMEOUT_S = 5.0
+_deferred_access_logging_active = False
 
 
 async def best_effort(
@@ -106,7 +117,7 @@ class AppRuntime:
         return cls(app=app, settings=settings or get_settings())
 
     async def startup(self) -> None:
-        logger.info("Starting Claude Code Proxy...")
+        logger.debug("Starting Claude Code Proxy...")
         admin_url = local_admin_url(self.settings)
         self._provider_registry = ProviderRegistry()
         self.app.state.provider_registry = self._provider_registry
@@ -121,6 +132,7 @@ class AppRuntime:
             )
             # Initialize smart proxy pool (SQLite-backed, persistent state)
             _init_proxy_pool(self.settings)
+            _install_proxy_access_filter()
             # Start hot-reload watcher for .env changes
             start_reload_watcher(_reload_cached_settings)
             # Initialize token tracker (loads persisted data from DB)
@@ -360,13 +372,23 @@ class AppRuntime:
         )
 
 
+def deferred_access_logging_enabled() -> bool:
+    """Return whether HTTP middleware should emit deferred uvicorn access logs."""
+    return _deferred_access_logging_active
+
+
 def _install_proxy_access_filter() -> None:
     """Patch uvicorn access logger to show proxy info inline on log lines.
 
-    Wraps each handler's formatter with ``ProxyAccessLogFormatter`` which
-    appends ``(via host:port)`` or ``(direct)`` to the formatted access log
-    line whenever ``set_request_proxy()`` has been called for the request.
+    Uvicorn logs access when response headers are sent, which is before
+    streaming upstream requests finish and ``set_request_proxy()`` runs.
+    We suppress those early lines and emit deferred access logs from HTTP
+    middleware after the response body completes.
+
+    ``ProxyAccessLogFormatter`` appends ``via host:port`` or ``direct`` to
+    each deferred access log line whenever ``set_request_proxy()`` was called.
     """
+    global _deferred_access_logging_active
     access_logger = logging.getLogger("uvicorn.access")
 
     for handler in access_logger.handlers:
@@ -375,17 +397,78 @@ def _install_proxy_access_filter() -> None:
         if isinstance(handler.formatter, ProxyAccessLogFormatter):
             continue  # already wrapped
         handler.formatter = ProxyAccessLogFormatter(handler.formatter)
-        logger.info("PROXY_POOL: Wrapped access handler with ProxyAccessLogFormatter")
+        logger.debug("PROXY_POOL: Wrapped access handler with ProxyAccessLogFormatter")
+
+    if not any(
+        isinstance(f, _SuppressUvicornAccessLogFilter) for f in access_logger.filters
+    ):
+        access_logger.addFilter(_SuppressUvicornAccessLogFilter())
 
     if access_logger.handlers:
-        logger.info(
-            "PROXY_POOL: Access log proxy injection active ({} handlers)",
+        _deferred_access_logging_active = True
+        logger.debug(
+            "PROXY_POOL: Deferred access logging active ({} handlers)",
             len(access_logger.handlers),
         )
     else:
         logger.warning(
             "PROXY_POOL: No uvicorn.access handlers found — proxy label won't appear"
         )
+
+
+def log_deferred_access(request: Request, response: Response | None) -> None:
+    """Emit the uvicorn access log line after the response body completes."""
+    access_logger = logging.getLogger("uvicorn.access")
+    if not access_logger.handlers:
+        return
+
+    client = request.client
+    client_addr = f"{client.host}:{client.port}" if client else "-"
+    path = request.url.path
+    if request.url.query:
+        path = f"{path}?{request.url.query}"
+    status_code = response.status_code if response is not None else 500
+    http_version = request.scope.get("http_version", "1.1")
+    proxy_label = proxy_label_from_store(
+        getattr(request.state, "proxy_access_label", None)
+    )
+
+    access_logger.info(
+        '%s - "%s %s HTTP/%s" %d',
+        client_addr,
+        request.method,
+        path,
+        http_version,
+        status_code,
+        extra={**DEFERRED_ACCESS_LOG_EXTRA, "proxy_label": proxy_label},
+    )
+    clear_request_proxy()
+
+
+class _DeferredAccessLogResponse:
+    """Log uvicorn access lines after the response body has been sent."""
+
+    def __init__(self, request: Request, response: Response) -> None:
+        self._request = request
+        self._response = response
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self._response(scope, receive, send)
+        finally:
+            log_deferred_access(self._request, self._response)
+
+
+def wrap_response_for_deferred_access_log(
+    request: Request, response: Response
+) -> Response:
+    """Wrap *response* so access logs run after streaming completes."""
+    if not _deferred_access_logging_active:
+        return response
+    return _DeferredAccessLogResponse(request, response)
 
 
 def _init_proxy_pool(settings: Settings) -> None:
@@ -431,12 +514,13 @@ def _init_proxy_pool(settings: Settings) -> None:
         s.max_failures_before_dead = json_cfg.get(
             "max_failures_before_dead", ip_rot.max_failures_before_dead
         )
-        s.health_check_interval_s = json_cfg.get(
-            "health_check_interval_minutes", ip_rot.health_check_interval_minutes
-        ) * 60.0
-        s.max_response_ms = json_cfg.get(
-            "max_response_ms", ip_rot.max_response_ms
+        s.health_check_interval_s = (
+            json_cfg.get(
+                "health_check_interval_minutes", ip_rot.health_check_interval_minutes
+            )
+            * 60.0
         )
+        s.max_response_ms = json_cfg.get("max_response_ms", ip_rot.max_response_ms)
         logger.debug(
             "PROXY_POOL: Settings applied: connect_timeout={}s, read_timeout={}s, "
             "cooldown={}h, max_failures={}, health_check={}s, max_response_ms={}",
@@ -457,7 +541,7 @@ def _init_proxy_pool(settings: Settings) -> None:
     asyncio.create_task(pool.start_background_health_check())
 
     logger.info(
-        "PROXY_POOL: Initialised (config={}, proxies={})",
-        json_path,
+        "PROXY_POOL: {} proxies ready ({})",
         pool.get_proxy_stats().get("total", 0),
+        json_path,
     )

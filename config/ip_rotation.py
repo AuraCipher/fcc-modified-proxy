@@ -30,7 +30,9 @@ def _load_proxies_from_json(config_path: Path) -> list[str]:
         if not isinstance(proxies, list):
             logger.warning("IP_ROTATION: JSON config has non-list 'proxies' field")
             return []
-        logger.info("IP_ROTATION: Loaded {} proxies from {}", len(proxies), config_path)
+        logger.debug(
+            "IP_ROTATION: Loaded {} proxies from {}", len(proxies), config_path
+        )
         return [str(p).strip() for p in proxies if p and str(p).strip()]
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("IP_ROTATION: Failed to read {}: {}", config_path, exc)

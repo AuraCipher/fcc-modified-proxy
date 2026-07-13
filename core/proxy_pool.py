@@ -36,16 +36,62 @@ from loguru import logger
 _current_proxy_label: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_current_proxy_label", default=""
 )
+_request_proxy_store: contextvars.ContextVar[dict[str, str] | None] = (
+    contextvars.ContextVar("_request_proxy_store", default=None)
+)
+
+
+def bind_request_proxy_store(
+    store: dict[str, str],
+) -> contextvars.Token[dict[str, str] | None]:
+    """Bind a per-request mutable store for proxy labels (HTTP response wrapper)."""
+    return _request_proxy_store.set(store)
+
+
+def reset_request_proxy_store(token: contextvars.Token[dict[str, str] | None]) -> None:
+    """Reset the active per-request proxy store binding."""
+    _request_proxy_store.reset(token)
 
 
 def set_request_proxy(label: str) -> None:
     """Store the proxy label for the current request (called from transports)."""
+    store = _request_proxy_store.get()
+    if store is not None:
+        store["label"] = label
     _current_proxy_label.set(label)
+
+
+def clear_request_proxy() -> None:
+    """Clear the proxy label for the current request."""
+    store = _request_proxy_store.get()
+    if store is not None:
+        store["label"] = ""
+    _current_proxy_label.set("")
 
 
 def get_request_proxy() -> str:
     """Return the proxy label for the current request, or ``""``."""
+    store = _request_proxy_store.get()
+    if store is not None:
+        return store.get("label", "")
     return _current_proxy_label.get()
+
+
+def proxy_label_from_store(store: object) -> str:
+    """Read a proxy label from a request-scoped store object."""
+    if isinstance(store, dict):
+        return str(store.get("label", ""))
+    return ""
+
+
+DEFERRED_ACCESS_LOG_EXTRA: dict[str, bool] = {"deferred_access": True}
+
+
+class _SuppressUvicornAccessLogFilter(logging.Filter):
+    """Drop uvicorn protocol access logs; deferred middleware logs after the body."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return bool(getattr(record, "deferred_access", False))
 
 
 class ProxyAccessLogFormatter(logging.Formatter):
@@ -61,10 +107,10 @@ class ProxyAccessLogFormatter(logging.Formatter):
         self._fmt = getattr(wrapped, "_fmt", None)
 
     def format(self, record: logging.LogRecord) -> str:
-        proxy = get_request_proxy()
+        proxy = getattr(record, "proxy_label", "") or get_request_proxy()
         original = self._wrapped.format(record)
         if proxy:
-            return f"{original.rstrip()} ({proxy})"
+            return f"{original.rstrip()} {proxy}"
         return original
 
     def formatTime(self, record, datefmt=None):
@@ -164,7 +210,7 @@ class ProxyPool:
 
         self._init_db()
         count = self._count_proxies()
-        logger.info(
+        logger.debug(
             "PROXY_POOL: Initialised with {} proxies, "
             "cooldown_default={}h, max_failures={}, health_check={}s",
             count,
@@ -290,12 +336,21 @@ class ProxyPool:
                         imported += 1
                 conn.commit()
 
-            logger.info(
-                "PROXY_POOL: Imported {} new proxies from {} ({} total)",
-                imported,
-                path,
-                self._count_proxies(),
-            )
+            total = self._count_proxies()
+            if imported:
+                logger.info(
+                    "PROXY_POOL: Imported {} new proxies from {} ({} total)",
+                    imported,
+                    path,
+                    total,
+                )
+            else:
+                logger.debug(
+                    "PROXY_POOL: Imported {} new proxies from {} ({} total)",
+                    imported,
+                    path,
+                    total,
+                )
             return imported
         except (json.JSONDecodeError, OSError) as exc:
             logger.error("PROXY_POOL: Failed to load {}: {}", path, exc)
@@ -647,7 +702,7 @@ class ProxyPool:
 
     async def start_background_health_check(self) -> None:
         """Run the health checker loop indefinitely (call from startup)."""
-        logger.info(
+        logger.debug(
             "PROXY_POOL: Background health checker started (interval={}s)",
             self._settings.health_check_interval_s,
         )

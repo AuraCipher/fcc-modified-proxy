@@ -13,17 +13,15 @@ from starlette.types import Receive, Scope, Send
 
 from config.hot_reload import get_reload_manager
 from config.logging_config import configure_logging
-from config.paths import server_log_path
 from config.settings import get_settings
 from core.trace import extract_claude_session_id_from_headers, trace_event
 from providers.exceptions import ProviderError
-
-_proxy_access_filter_installed = False
 
 from .admin_routes import router as admin_router
 from .routes import router
 from .runtime import AppRuntime, startup_failure_message
 from .validation_log import summarize_request_validation_body
+from core.proxy_pool import bind_request_proxy_store, reset_request_proxy_store
 
 
 @asynccontextmanager
@@ -87,10 +85,10 @@ class GracefulLifespanApp:
 
 def create_app(*, lifespan_enabled: bool = True) -> FastAPI:
     """Create and configure the FastAPI application."""
+    configure_logging()
     settings = get_settings()
-    configure_logging(
-        server_log_path(), verbose_third_party=settings.log_raw_api_payloads
-    )
+    if settings.log_raw_api_payloads:
+        configure_logging(verbose_third_party=True, force=True)
 
     app_kwargs: dict[str, Any] = {
         "title": "Claude Code Proxy",
@@ -103,19 +101,19 @@ def create_app(*, lifespan_enabled: bool = True) -> FastAPI:
     @app.middleware("http")
     async def track_active_requests(request: Request, call_next):
         """Track active requests for hot-reload coordination."""
-        global _proxy_access_filter_installed
-        if not _proxy_access_filter_installed:
-            from api.runtime import _install_proxy_access_filter
-            _install_proxy_access_filter()
-            _proxy_access_filter_installed = True
+        from api.runtime import wrap_response_for_deferred_access_log
 
+        proxy_store = {"label": ""}
+        request.state.proxy_access_label = proxy_store
+        store_token = bind_request_proxy_store(proxy_store)
         reload_mgr = get_reload_manager()
         reload_mgr.register_request_start()
         try:
             response = await call_next(request)
+            return wrap_response_for_deferred_access_log(request, response)
         finally:
+            reset_request_proxy_store(store_token)
             reload_mgr.register_request_end()
-        return response
 
     @app.middleware("http")
     async def trace_http_correlation(request: Request, call_next):
